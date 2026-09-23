@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+#
+# Put every pinned app back in its room, and every stray floating window back
+# in the tiling tree.
+#
+# A birth rule in aerospace.toml runs once, when a window is first seen. After
+# that nothing holds the invariant: ⌘W and reopen, a mis-aimed key, a window
+# AeroSpace only noticed after it was already somewhere — any of these leaves
+# Ghostty in the drawer, and it stays there. This is the other half of the
+# rule: run it and the rooms are right again.
+#
+# Wired to the room keys (after the switch, so the switch stays instant) and to
+# startup, where windows that predate AeroSpace never fired a rule at all.
+# Costs one list-windows and, only when something has strayed, one request.
+
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/aerospace-lib"
+
+# A floating window is not laid out at all: AeroSpace keeps whatever frame it
+# had, and every workspace switch parks it at the bottom-right corner of the
+# screen and puts it back where it thinks it was. The frame drifts a little
+# each time, and macOS clamps it to the screen, so it settles hard against the
+# bottom-right edge — gap on the left and top, none under it or to its right.
+# That is what an accidental `layout floating` looks like hours later, and the
+# window it happens to is usually Ghostty. Nothing in this setup wants a
+# floating window (accordion already gives every window the full screen), so
+# the heal tiles them back. FLOAT_OK in aerospace-lib holds the exceptions.
+
+homes=$(pinned_homes)
+
+# Two inputs to one awk: the homes first (FNR==NR), then the windows. Unfloat
+# before moving: a window put back into the tree lands in the room it is in,
+# and the move that follows takes it home from there.
+strays=$(awk -v float_ok=" $FLOAT_OK " '
+	FNR == NR { home[$1] = $2; next }
+	$4 == "floating" && !index(float_ok, " " $1 " ") { unfloat = unfloat sep(unfloat) "layout tiling --window-id " $2 }
+	($1 in home) && $3 != home[$1] { move = move sep(move) "move-node-to-workspace --window-id " $2 " " home[$1] }
+	function sep(s) { return s ? "; " : "" }
+	END { if (unfloat || move) print unfloat (unfloat && move ? "; " : "") move }
+' <(printf '%s\n' "$homes") <(aerospace list-windows --all --format '%{app-bundle-id} %{window-id} %{workspace} %{window-layout}'))
+
+[[ -n "$strays" ]] && aerospace eval "$strays"
+exit 0

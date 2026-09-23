@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Turn the whole bar off or on: `bar-power off`, `bar-power on`, or
+# `bar-power` alone to flip it.
+#
+# Off means off, not hidden. `--bar hidden=on` would leave every resident
+# process running for a bar nobody can see, and plugins/game-hide would put it
+# back on the next app switch. So off stops everything, and the macOS menu bar
+# comes back with it -- bin/hide-menubar is one of the processes that stops,
+# which is the arrangement bin/supervise describes: no bar, so you get your
+# menu bar back.
+#
+# The way back cannot be a button on the bar, because there is no bar. It is
+# the leader layer's b in aerospace.toml, which calls this with no argument.
+#
+# ORDER, when turning off. The popup runs this as a child of sketchybar, and
+# supervise lives in sketchybar's process group, so `launchctl bootout` takes
+# down this script and supervise together. Supervise is stopped first, on its
+# own terms: its TERM trap is what stops hide-menubar and the rest. Bootout
+# comes last because nothing after it is guaranteed to run.
+#
+# bootout, not `brew services stop`. The job has KeepAlive, so killing
+# sketchybar would only restart it; bootout unloads the job for this login
+# session. `brew services stop` would also remove it from login, and a bar
+# turned off for a minute should not stay off after the next restart.
+
+LABEL=homebrew.mxcl.sketchybar
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+DOMAIN="gui/$(id -u)"
+PIDFILE="${XDG_STATE_HOME:-$HOME/.local/state}/sketchybar/supervise.pid"
+
+running() { /bin/launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; }
+
+off() {
+  local pid
+  pid=$(cat "$PIDFILE" 2>/dev/null)
+  if [ -n "$pid" ] && kill -TERM "$pid" 2>/dev/null; then
+    # supervise's cleanup waits 0.4 s for its children before KILLing them.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.1
+    done
+  fi
+  /bin/launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null
+}
+
+on() {
+  /bin/launchctl bootstrap "$DOMAIN" "$PLIST"
+}
+
+case "${1:-toggle}" in
+  off)    running && off ;;
+  on)     running || on ;;
+  toggle) if running; then off; else on; fi ;;
+  *)      echo "usage: bar-power [on|off]" >&2; exit 2 ;;
+esac

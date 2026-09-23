@@ -1,0 +1,61 @@
+# macOS writes these into any directory opened in Finder. They hold nothing but
+# per-folder view preferences, so they are noise in every `git status` and worth
+# nothing in history.
+.DS_Store
+
+# Editors and tools that "help" by leaving a copy behind. Git already has the
+# history, so a .bak is a second, worse copy that outlives its reason.
+*.bak
+*.bak-*
+*.bak.*
+
+# Half-written files from interrupted atomic writes. Eleven of these once held
+# 6 MB of dead codex state.
+*.tmp-*
+
+# pi writes a lock next to the settings file it is updating.
+*.lock
+
+# Notes an agent left behind while working something out. Useful for an hour,
+# misleading for a year: they are a snapshot of what was true during one
+# session, and the conclusions worth keeping were written into the configs and
+# their READMEs instead.
+.scratch/*
+# Including the orchestration tickets. Joel's ruling, 2026-09-05: they are a
+# working surface that changes many times an hour, and history of it is noise.
+# They stay on disk; what is worth keeping is written into the configs and their
+# READMEs, which are tracked.
+
+# Claude Code's per-repo directory. It lives here and is never tracked.
+.claude/
+
+# The status bar's compiled probe, and the picture of the spectrum rule. Both
+# are build output keyed to this machine -- the rule is sized to this screen --
+# and install.sh rebuilds them. Same rule as "Pi Open.app": a binary in a
+# dotfiles repo is a thing you cannot read a diff of.
+sketchybar/bin/sysprobe
+sketchybar/bin/hide-menubar
+sketchybar/bin/wake-powerui
+
+# pi-background-tasks spools job output and delegate/Fusion artifacts under the
+# cwd, keyed by session and pid. The package never deletes them (they double as
+# local audit evidence), but they are useless to anyone but the session that
+# wrote them, so they don't belong in history.
+.pi/tasks/
+.pi/delegate/
+.pi/fusion/
+
+# A trial run of a branch keeps its agent directory beside the checkout, so it
+# never writes to ~/.pi/agent. It holds sessions and a copied settings file --
+# state, not source (see pi/kit/bin/pi-try).
+.pi-try/
+
+# Generated colour files: output of bin/theme, rebuilt by one command from
+# theme/setups/*.toml. The current-* symlinks in theme/gen are the only state
+# the theme system has.
+theme/gen/
+
+# Python's bytecode cache. Same rule as sysprobe: build output, rebuilt on
+# every run, and a diff you cannot read. Four of these were tracked for a
+# while and turned up dirty in `git status` after every theme test.
+__pycache__/

@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# The boost button: charge past the 80% limit, this once.
+#
+# ── What this actually flips ────────────────────────────────────────────────
+#
+# The 80% cap is macOS's native Charge Limit. PowerUIAgent (root) owns it: it
+# reads `mclLimitValue` out of its plist and registers the limit with powerd,
+# which is what actually gates the charger. Apple ships no command for any of
+# this -- the only controls are the Settings slider and a "charge to full now"
+# button that appears once you are already held at 80, which is exactly too
+# late to press it and leave the house.
+#
+# Measured on this machine (macOS 26.6.2), the working sequence is:
+#
+#   defaults write com.apple.smartcharging.topoffprotection mclLimitValue 100
+#   killall -9 PowerUIAgent
+#
+# The write alone does nothing: the agent caches its settings for life.
+# `launchctl kickstart` is blocked by SIP, and the agent *ignores* a plain
+# SIGTERM -- SIGKILL is the one signal it cannot decline. launchd respawns it
+# on demand, it re-reads the plist on the way up, re-registers the limit with
+# powerd, and charging current starts flowing 40-60 seconds after the click.
+# `pmset -g battlimit` goes from `chargeSocLimitSoc = 80` to `= 100`; watched
+# live, ChargingCurrent went 0 -> 1039 mA while the battery sat held at 80.
+#
+# ── Who sets the limit ──────────────────────────────────────────────────────
+#
+# bin/pump, and only pump. It holds the limit at or above the charge whenever
+# the cable is in, because the native limit comes with a drain: plugged in
+# above the limit, macOS runs the machine off the battery until it is back
+# down to it (`pmset -g battlimit` shows chargeSocLimitDrain = 1 on every
+# manual limit, and nothing in PowerUIAgent turns it off). Pumping charge out
+# of a battery that is sitting on the cable is a wasted cycle, so the limit
+# is raised to meet the charge instead. The rule lives in bin/pump.
+#
+# The limit comes in the steps the Settings slider offers -- 80, 85, 90, 95,
+# 100 (PowerUIAgent's availableChargeLimits) -- and those five, exactly, are
+# what the sudoers rule names.
+#
+# ── One press, one charge ───────────────────────────────────────────────────
+#
+# The boost is a request to pump: a state file that means "100 while the
+# cable is in". The press is final: the chevrons disappear the moment it lands
+# and stay gone until the boost ends, so there is no cancel. Pump ends it --
+# deletes the file -- at 100% or when the cable comes out, and lives in /tmp
+# so a reboot cannot carry a forgotten boost across days.
+#
+# The writes and the kill go through sudo -n under one narrow sudoers rule
+# naming these exact command lines -- the same pattern as power-toggle,
+# written by install.sh. No rule installed? The press opens the Battery pane
+# and does nothing, rather than fail silently.
+
+set -u
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+SKETCHYBAR=/opt/homebrew/bin/sketchybar
+
+STATE=/tmp/sketchybar-chargeboost
+DOM=com.apple.smartcharging.topoffprotection
+# Present while the last limit write was refused; bin/pump retries on it.
+FAILED=/tmp/sketchybar-chargelimit-failed
+
+# The exact command lines the sudoers rule names. Change them there too, or
+# every limit change fails and every press becomes a Settings deep-link.
+LIMITS="80 85 90 95 100"
+write_cmd() { echo /usr/bin/defaults write "$DOM" mclLimitValue -int "$1"; }
+
+# Write, kill, knock -- all three, in order. The write alone is invisible
+# (the agent caches for life), the kill alone leaves the agent dead until
+# launchd feels demand, which on an idle machine is minutes away. The knock
+# is that demand: bin/wake-powerui makes launchd respawn the agent, which
+# re-reads the plist on the way up. See wake-powerui.c.
+set_limit() {                                        # one of $LIMITS
+  case " $LIMITS " in *" $1 "*) ;; *) echo "charge-boost: no limit $1" >&2; return 1 ;; esac
+  if ! sudo -n $(write_cmd "$1") 2>/dev/null; then
+    touch "$FAILED"
+    return 1
+  fi
+  rm -f "$FAILED"
+  sudo -n /usr/bin/killall -9 PowerUIAgent 2>/dev/null || true
+  "$DIR/bin/wake-powerui" 2>/dev/null || true
+}
+
+# Hidden at once, not on pump's next tick: the click should visibly land.
+# Pump decides when the chevrons come back.
+hide() {
+  "$SKETCHYBAR" --set boost drawing=off \
+                --set sp.boost drawing=off >/dev/null 2>&1
+}
+
+# Whether sudo will run this exact line without a password. `sudo -l CMD`
+# cannot say -- an admin is permitted everything with a password, so it
+# answers yes for anything -- but `sudo -n -l` lists the NOPASSWD grants
+# without prompting. install.sh's sudo_allows is the same check.
+granted() {
+  sudo -n -l 2>/dev/null \
+    | /usr/bin/awk -F', ' '/NOPASSWD: / { sub(/^.*NOPASSWD: /, ""); for (i = 1; i <= NF; i++) print $i }' \
+    | /usr/bin/grep -Fxq -- "$*"
+}
+
+# The press. Pump sees the state file on its next tick and raises the limit;
+# asking sudo first is what lets a missing rule fall back to the Settings pane
+# instead of a press that does nothing.
+boost() {
+  [ -f "$STATE" ] && return 0
+  if ! granted $(write_cmd 100); then
+    open "x-apple.systempreferences:com.apple.Battery-Settings.extension" 2>/dev/null
+    return 0
+  fi
+  touch "$STATE"
+  hide
+}
+
+# The limit powerd has registered, for pump to start from: the first
+# chargeSocLimitSoc, or 100 when there is none, which is what no limit means.
+current() {
+  local soc
+  soc=$(pmset -g battlimit 2>/dev/null | /usr/bin/awk -F'= *' '/chargeSocLimitSoc/ { sub(/;.*/, "", $2); print $2; exit }')
+  echo "${soc:-100}"
+}
+
+case "${1:-boost}" in
+  limit)   set_limit "${2:-}" ;;
+  current) current ;;
+  *)       boost ;;
+esac

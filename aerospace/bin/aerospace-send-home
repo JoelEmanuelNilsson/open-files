@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+#
+# Send the focused window to the room it belongs in, and stay where you are.
+#
+# Ghostty goes to 1, Chrome to 2, anything else to the drawer (3). The homes
+# come from aerospace.toml via aerospace-lib. A pinned app already in its room
+# simply stays put — so this key can never strand your terminal.
+
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/aerospace-lib"
+
+read -r id app ws < <(aerospace list-windows --focused --format '%{window-id} %{app-bundle-id} %{workspace}')
+[[ -n "${id:-}" ]] || exit 0
+
+home=$(home_of "$app")
+[[ "$ws" == "$home" ]] && exit 0
+aerospace move-node-to-workspace --window-id "$id" "$home"

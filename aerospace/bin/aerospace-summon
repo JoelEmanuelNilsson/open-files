@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+#
+# Bring an app to the room you are standing in — or, if it is already here,
+# send it home.
+#
+#   aerospace-summon <bundle-id>
+#
+# One key does both halves. Press it and Finder lands on top of your terminal
+# at full width (rooms are accordions: the newcomer covers, the terminal peeks
+# out at the sides). Press it again and every Finder window goes home to the
+# drawer, and the terminal is full screen again because it is alone.
+#
+# Why a script: `open -b` raises the existing window wherever it already is,
+# and AeroSpace follows the focus — you get dragged to the drawer instead of
+# the window coming to you. AeroSpace has no summon command of its own.
+#
+# Why there is no width arithmetic any more: there used to be, when rooms were
+# side-by-side tiles and a newcomer had to be squeezed to a third in the same
+# frame it arrived. In an accordion every window is full width, so a move and
+# a focus in one request is the whole job, and an app that refuses to shrink
+# (Spotify, Wispr Flow) is no longer a special case.
+
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/aerospace-lib"
+
+bundle_id=${1:?usage: aerospace-summon <bundle-id>}
+home=$(home_of "$bundle_id")
+here=$(aerospace list-workspaces --focused)
+
+# One query for every window on the machine, filtered here. `--app-bundle-id`
+# is only legal alongside --workspace/--monitor; with --all it exits 2.
+list_app_windows() {
+	aerospace list-windows --all --format '%{app-bundle-id} %{window-id} %{workspace}' |
+		awk -v id="$bundle_id" '$1 == id { print $2, $3 }'
+}
+windows=$(list_app_windows)
+
+# Already here: dismiss. Every window of the app goes home in one request, so
+# the room redraws once.
+if [[ -n "$windows" ]] && awk -v here="$here" '$2 == here { found = 1 } END { exit !found }' <<<"$windows"; then
+	aerospace eval "$(awk -v ws="$home" '{ printf "%smove-node-to-workspace --window-id %s %s", (NR > 1 ? "; " : ""), $1, ws }' <<<"$windows")"
+	exit 0
+fi
+
+if [[ -z "$windows" ]]; then
+	# Cold, or running windowless after a ⌘W. `open -g` asks for a window
+	# without raising the app. It is born in this room — no rule says
+	# otherwise — and lands on top. Notice it fast: poll every 20ms.
+	open -g -b "$bundle_id"
+	for _ in $(seq 250); do
+		windows=$(list_app_windows)
+		[[ -n "$windows" ]] && break
+		sleep 0.02
+	done
+	[[ -z "$windows" ]] && exit 0
+fi
+
+read -r id ws <<<"$windows"
+if [[ "$ws" == "$here" ]]; then
+	aerospace focus --window-id "$id"
+else
+	aerospace eval "move-node-to-workspace --window-id $id $here; focus --window-id $id"
+fi

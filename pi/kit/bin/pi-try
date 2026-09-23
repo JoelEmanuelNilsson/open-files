@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# Run a checkout of this repo as the live harness, without touching ~/.pi/agent.
+#
+# pi reads the kit straight out of ~/dotfiles, so the only way to try a branch
+# used to be to switch that checkout's branch -- which moves settings.json, the
+# agent type files and the prompt out from under every running session. This
+# script gives the trial checkout its own agent directory instead
+# (PI_CODING_AGENT_DIR), so the live harness is never written to and the two
+# cannot interfere.
+#
+#     pi-try <worktree-path|branch> [pi args...]
+#
+# A branch name that is not a path becomes ~/.worktrees/try-<branch>, created if
+# it does not exist. Auth is shared with the real agent dir by symlink, because
+# a copy goes stale the next time a token refreshes. Sessions, settings and the
+# model store are the trial's own, so nothing the trial does shows up in the
+# real harness.
+
+set -euo pipefail
+
+target="${1:-}"
+if [[ -z "$target" ]]; then
+	echo "usage: pi-try <worktree-path|branch> [pi args...]" >&2
+	exit 2
+fi
+shift
+
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+real_agent="${HOME}/.pi/agent"
+
+if [[ -d "$target" ]]; then
+	wt="$(cd "$target" && pwd)"
+else
+	wt="${HOME}/.worktrees/try-${target}"
+	[[ -d "$wt" ]] || git -C "$repo" worktree add "$wt" "$target"
+fi
+
+[[ -f "$wt/pi/settings.json" ]] || { echo "pi-try: $wt has no pi/settings.json" >&2; exit 1; }
+
+# The kit imports pi's own packages, and a fresh worktree has no node_modules.
+# Point at whatever the live kit resolved, so a trial never needs an install.
+src="${repo}/pi/kit/node_modules"
+mkdir -p "$wt/pi/kit/node_modules/@earendil-works"
+for p in pi-agent-core pi-ai pi-coding-agent pi-tui; do
+	if [[ -e "$src/@earendil-works/$p" ]]; then
+		ln -sfn "$(readlink "$src/@earendil-works/$p")" "$wt/pi/kit/node_modules/@earendil-works/$p"
+	fi
+done
+if [[ -e "$src/typebox" ]]; then
+	ln -sfn "$(readlink "$src/typebox")" "$wt/pi/kit/node_modules/typebox"
+fi
+
+agent="$wt/.pi-try"
+mkdir -p "$agent" "$agent/sessions" "$agent/chat-sessions" "$agent/extensions" "$agent/git"
+
+# Shared with the real agent dir: credentials, and the npm packages pi already
+# installed. Both are expensive to duplicate and harmless to share.
+ln -sfn "$real_agent/auth.json" "$agent/auth.json"
+for d in npm bin; do
+	if [[ -d "$real_agent/$d" ]]; then ln -sfn "$real_agent/$d" "$agent/$d"; fi
+done
+
+# Read out of the trial checkout, exactly as install.sh links them out of the
+# live one -- so the trial runs the branch's prompt and agent types, not main's.
+# `subagents.json` and `agent-tool-description.md` exist only on branches that
+# still run pi-subagents; on the others the link must go, or pi loads main's.
+for f in AGENTS.md APPEND_SYSTEM.md keybindings.json models.json agents subagents.json agent-tool-description.md; do
+	if [[ -e "$wt/pi/$f" ]]; then
+		ln -sfn "$wt/pi/$f" "$agent/$f"
+	else
+		rm -f "$agent/$f"
+	fi
+done
+
+# Copies, not links: pi writes to these, and a trial must not write to the live
+# harness. The kit path is rewritten so the trial loads its own kit.
+python3 - "$wt" "$agent" <<'PY'
+import json, sys, pathlib
+wt, agent = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+settings = json.loads((wt / "pi" / "settings.json").read_text())
+settings["packages"] = [
+	str(wt / "pi" / "kit") if p.rstrip("/").endswith("/dotfiles/pi/kit") else p
+	for p in settings.get("packages", [])
+]
+(agent / "settings.json").write_text(json.dumps(settings, indent=2) + "\n")
+PY
+for f in models-store.json trust.json web-search.json; do
+	if [[ -f "$real_agent/$f" && ! -f "$agent/$f" ]]; then cp "$real_agent/$f" "$agent/$f"; fi
+done
+
+echo "pi-try: $(git -C "$wt" rev-parse --abbrev-ref HEAD) at $(git -C "$wt" rev-parse --short HEAD)"
+echo "        kit  $wt/pi/kit"
+echo "        agent dir $agent   (${real_agent} is untouched)"
+cd "$wt"
+exec env PI_CODING_AGENT_DIR="$agent" pi "$@"

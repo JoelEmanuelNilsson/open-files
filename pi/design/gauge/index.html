@@ -1,0 +1,728 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>The twelve cells — what should the bottom rule show?</title>
+<link rel="stylesheet" href="theme.css">
+<style>
+/* ── the terminal, at page scale ───────────────────────────────────────
+   The subject is a rule drawn in a terminal, so the page draws real rules
+   in real monospace. Braille (⣿) needs Menlo on macOS; SF Mono has no
+   braille block and falls back silently, so Menlo is named first here. */
+.tty{font-family:Menlo,"SF Mono",ui-monospace,monospace; white-space:pre; letter-spacing:0;
+  line-height:1.45; color:var(--muted); font-variant-ligatures:none; text-decoration:none; cursor:default}
+.tty.hero{font-size:clamp(13px,1.55vw,25px)}
+.tty.mid{font-size:clamp(11px,1.15vw,17px)}
+.tty.small{font-size:13px}
+.box{background:#1e1c2e; border-radius:10px; padding:22px 26px; overflow-x:auto; max-width:920px;
+  box-shadow:inset 0 1px 0 rgba(var(--ink),.06),0 18px 44px rgba(0,0,0,.3)}
+.box.flat{box-shadow:none; padding:18px 20px; max-width:none}
+:root[data-theme="light"] .box{background:#fffaf3; box-shadow:inset 0 1px 0 rgba(var(--ink),.06),0 18px 44px rgba(0,0,0,.08)}
+.bd{color:var(--muted)}          /* border, dashes, corners */
+.ac{color:var(--foam)}           /* cwd, branch, timer: accent */
+.md{color:var(--subtle)}         /* model id */
+.th{color:var(--iris)}           /* thinking level */
+.pr{color:var(--text)}           /* prompt text */
+.spend{color:var(--foam)}        /* cells already spent */
+.hot{color:var(--gold)}          /* spent past the clock: borrowed */
+.tick{color:var(--iris)}         /* where the clock is */
+.dots{color:var(--hhigh)}        /* unspent */
+.dead{color:var(--love)}
+.seg1{color:var(--iris)} .seg2{color:var(--rose)} .seg3{color:var(--foam)}
+.agentrun{color:var(--foam)} .agentdone{color:var(--muted)}
+
+/* the bracket that points at the twelve cells, drawn on the same monospace grid */
+.callout{display:block; margin-top:-2px; color:var(--gold); white-space:pre}
+
+/* strip: stations size to their own words, so none is clipped or overlapped */
+.strip li{flex:0 1 auto} .strip .station{flex:0 1 auto}
+
+/* a command sits in a chip inside the block it proves, never loose beside it */
+.chip{display:block; font-family:var(--mono); font-size:12.5px; color:var(--subtle);
+  background:var(--hlow); border-left:2px solid var(--overlay); border-radius:0 5px 5px 0;
+  padding:8px 12px; margin:12px 0 0; overflow-x:auto; white-space:pre; max-width:100%}
+.chip b{color:var(--foam); font-weight:400}
+
+/* the two-window comparison */
+.pair{display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:20px; margin:20px 0 0}
+.win{background:var(--surface); border:1px solid var(--overlay); border-radius:10px; padding:18px 20px}
+.win .k{font-family:var(--mono); font-size:11px; letter-spacing:.09em; text-transform:uppercase; color:var(--muted); margin:0 0 10px}
+.win .big{font-family:var(--display); font-size:40px; font-weight:800; letter-spacing:-0.03em; line-height:1; margin:12px 0 4px}
+.win .so{color:var(--subtle); font-size:15px; margin:0; max-width:none}
+.win.cold .big{color:var(--muted)} .win.live .big{color:var(--gold)}
+
+/* the range picture: where the alarms sit versus where Joel lives */
+.scale{position:relative; height:96px; margin:22px 0 6px}
+.scale .track{position:absolute; left:0; right:0; top:34px; height:26px; background:var(--hlow);
+  border-radius:4px; box-shadow:0 0 0 1px var(--overlay) inset}
+.scale .zone{position:absolute; top:34px; height:26px}
+.scale .warn{background:color-mix(in srgb,var(--gold) 26%,transparent)}
+.scale .crit{background:color-mix(in srgb,var(--love) 30%,transparent)}
+.scale .lived{position:absolute; top:26px; height:42px; border-radius:4px;
+  background:color-mix(in srgb,var(--foam) 34%,transparent); box-shadow:0 0 0 1px var(--foam) inset}
+.scale .lab{position:absolute; font-family:var(--mono); font-size:12px; letter-spacing:.05em; white-space:nowrap}
+.scale .lab.top{top:2px} .scale .lab.bot{top:68px}
+
+/* signature: the pace bar bench */
+.bench{background:var(--surface); border:1px solid var(--overlay); border-radius:14px; padding:26px 28px 22px; margin:24px 0 0}
+.dials{display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:22px; margin:22px 0 0}
+.dial label{display:block; font-family:var(--mono); font-size:12px; letter-spacing:.07em; text-transform:uppercase; color:var(--muted); margin:0 0 6px}
+.dial .val{font-family:var(--display); font-size:26px; font-weight:700; letter-spacing:-0.02em}
+.dial.a .val{color:var(--foam)} .dial.b .val{color:var(--iris)}
+input[type=range]{width:100%; margin:8px 0 0; accent-color:var(--iris); background:transparent}
+.readout{margin:22px 0 0; padding:16px 18px; border-radius:10px; background:var(--hlow);
+  border-left:3px solid var(--gold); font-size:17px; min-height:62px}
+.readout.ok{border-left-color:var(--pine)}
+.readout b{font-family:var(--display); font-weight:700}
+.legend{margin:18px 0 0; font-size:14.5px; color:var(--subtle); display:flex; flex-direction:column; gap:8px}
+.legend div{display:flex; gap:12px; align-items:baseline}
+.legend .tty{font-size:15px; flex:0 0 auto}
+
+/* options and breaks */
+.options{grid-template-columns:repeat(2,minmax(0,1fr))}
+@media (max-width:1000px){.options{grid-template-columns:1fr}}
+.option{display:flex; flex-direction:column}
+.option .tty{display:block; background:#1e1c2e; border-radius:6px; padding:10px 12px; margin:12px 0 14px; overflow-x:auto}
+:root[data-theme="light"] .option .tty{background:#fffaf3}
+.option dl{margin:0; display:flex; flex-direction:column; gap:9px}
+.option dt{font-family:var(--mono); font-size:10.5px; letter-spacing:.1em; text-transform:uppercase; color:var(--muted)}
+.option dd{margin:2px 0 0; color:var(--subtle); font-size:15px; line-height:1.45}
+.breaks{width:100%; border-collapse:collapse; margin:16px 0 0; font-size:15.5px}
+.breaks th{text-align:left; font-family:var(--mono); font-size:11px; letter-spacing:.08em; text-transform:uppercase;
+  color:var(--muted); font-weight:400; padding:0 14px 8px 0; border-bottom:1px solid var(--overlay)}
+.breaks td{padding:12px 14px 12px 0; border-bottom:1px solid var(--overlay); vertical-align:top; color:var(--subtle)}
+.breaks td:first-child{color:var(--text)}
+.answer .pick-row{display:flex; flex-wrap:wrap; gap:14px; margin:0 0 12px}
+.answer .pick-row label{display:inline-flex; gap:7px; align-items:center; margin:0; font-size:16px}
+</style>
+</head>
+<body>
+
+<nav class="strip" aria-label="Sections of this page">
+  <ol>
+    <li><a class="station" href="#now"><span class="nm">The rule now</span><span class="wd">12 cells</span></a></li>
+    <li class="mark"><span class="arrow">→</span></li>
+    <li><a class="station" href="#dead"><span class="nm">Alarm is off</span><span class="wd">compaction off</span></a></li>
+    <li class="mark"><span class="arrow">→</span></li>
+    <li><a class="station" href="#unseen"><span class="nm">What binds</span><span class="wd">5-hour window</span></a></li>
+    <li class="mark"><span class="arrow">→</span></li>
+    <li><a class="station" href="#pace"><span class="nm">The pace bar</span><span class="wd">drag it</span></a></li>
+    <li class="mark"><span class="arrow">→</span></li>
+    <li><a class="station" href="#options"><span class="nm">Four options</span><span class="wd">pick one</span></a></li>
+  </ol>
+  <button class="theme-toggle" id="themeToggle" aria-label="Switch between dark and light">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><g class="moon"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></g><g class="sun"><circle cx="12" cy="12" r="4.2"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"/></g></svg>
+  </button>
+</nav>
+
+<div class="page">
+<main class="content">
+
+  <h1>The bar never fills. Bin it, or give it a job?</h1>
+  <p class="lead">Twelve cells sit at the end of your prompt box, warning that
+  compaction is coming. Compaction is switched off. This page is one decision:
+  what goes in those twelve cells.</p>
+
+  <div class="gaps">
+    <h2>Not proved yet</h2>
+    <p style="margin:0 0 8px">Anthropic's <span class="term" data-x="utilization">utilization</span>
+    header reads <code>0.67</code>. Two probes two minutes apart moved it by
+    <code>0.01</code> under ordinary work, which only makes sense as a fraction of one —
+    but no document says so. One check against Claude Code's own <code>/usage</code> settles it.</p>
+    <p style="margin:0 0 8px">Nothing in the harness reads these headers today.
+    <span class="tag absent">absent</span> <code>rg -n "ratelimit" pi/kit</code> returns nothing.</p>
+    <p style="margin:0">Background agents report start and settle, nothing in between.
+    There is no progress to draw. <span class="tag absent">absent</span></p>
+  </div>
+
+  <!-- ─────────────────────────────────────────────────────────── -->
+  <section id="now">
+    <h2>Here is the rule, at the fullest it ever gets</h2>
+    <figure>
+      <div class="box">
+        <div class="tty hero" id="heroBox" aria-label="The prompt box bottom rule with the twelve-cell gauge at thirty-five percent"></div>
+        <div class="tty hero callout" id="heroCallout" aria-label="A bracket pointing at the twelve cells"></div>
+      </div>
+      <figcaption>Your ceiling is 350,000 tokens in a 1,000,000-token window
+      <span class="tag derived">derived</span>. Four cells of twelve, and the most
+      that bar has ever shown.
+      <span class="chip">$ jq '."anthropic-messages"."claude-opus-5".contextWindow' .../pi-ai/dist/providers/data/anthropic.json
+<b>1000000</b></span>
+      </figcaption>
+    </figure>
+    <p>Those eighteen columns are the most protected thing in the frame. As the
+    terminal narrows the rule gives up the timer, then the task count, then it
+    squeezes the branch — and the <span class="term" data-x="gauge">gauge</span> is
+    the last label standing <span class="tag derived">derived</span>. Whatever
+    lives there is, by construction, the frame's most important fact.</p>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────────────── -->
+  <section id="dead">
+    <h2>It is an alarm for a fire that cannot start</h2>
+
+    <figure>
+      <div class="scale" aria-label="A scale from zero to one hundred percent. Joel's whole operating range is the first thirty-five percent. The gauge's warning colour starts at seventy percent and its alarm at ninety, both far outside that range.">
+        <div class="track"></div>
+        <div class="zone warn" style="left:70%; width:20%"></div>
+        <div class="zone crit" style="left:90%; width:10%"></div>
+        <div class="lived" style="left:0; width:35%"></div>
+        <div class="lab top" style="left:0; color:var(--foam)">every session you have ever run</div>
+        <div class="lab bot" style="left:0; color:var(--muted)">0</div>
+        <div class="lab bot" style="left:35%; transform:translateX(-50%); color:var(--foam)">35%</div>
+        <div class="lab bot" style="left:70%; transform:translateX(-50%); color:var(--gold)">70% warning</div>
+        <div class="lab bot" style="left:90%; transform:translateX(-50%); color:var(--love)">90% alarm</div>
+        <div class="lab bot" style="right:0; color:var(--muted)">100%</div>
+      </div>
+      <figcaption>The gauge turns amber past 70% and red past 90%
+      <span class="tag derived">derived</span>. You never leave the blue.</figcaption>
+    </figure>
+
+    <p>And the event it warns about is off:
+    <span class="term" data-x="compaction">compaction</span> is disabled in settings,
+    replaced by <code>handoff</code>, where the model writes its own summary when
+    you ask <span class="tag derived">derived</span>.</p>
+    <p class="chip">$ jq -c '.compaction' ~/.pi/agent/settings.json
+<b>{"enabled":false}</b></p>
+    <p>The code says so itself, in its own doc comment: <em>"it is the only thing on
+    screen that says compaction is coming."</em> That sentence was true once. It
+    is the reason the gauge outranks everything else in the rule, and it is now false.</p>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────────────── -->
+  <section id="unseen">
+    <h2>Meanwhile, the limit that does stop you is invisible</h2>
+    <p>Every Claude response carries your usage back in its headers, free, on a
+    hook this harness already listens to
+    <span class="term" data-x="after_provider_response">after_provider_response</span>.
+    Nothing reads them. Here are both numbers as they stood at 22:35 tonight, drawn
+    on the same twelve cells.</p>
+
+    <div class="pair">
+      <div class="win cold">
+        <p class="k">context window</p>
+        <div class="tty mid" id="winCtx" aria-label="Context gauge: four cells of twelve filled"></div>
+        <p class="big">35%</p>
+        <p class="so">Your ceiling, not tonight's reading. Of one million tokens.
+        Nothing happens when it fills, because compaction is off.</p>
+      </div>
+      <div class="win live">
+        <p class="k">5-hour usage window</p>
+        <div class="tty mid" id="winRate" aria-label="Budget gauge: eight cells of twelve filled, with the last three in amber past the clock mark"></div>
+        <p class="big">67%</p>
+        <p class="so">Two thirds spent, with 45% of the five hours gone
+        <span class="tag derived">derived</span>. Holding that rate, it empties at
+        23:42 — an hour and a half before it refills at 01:20.</p>
+      </div>
+    </div>
+
+    <p class="chip">$ curl -D- -o/dev/null … api.anthropic.com/v1/messages | rg ratelimit
+<b>anthropic-ratelimit-unified-5h-utilization: 0.67</b>
+<b>anthropic-ratelimit-unified-5h-reset: 1788391200</b>   # 01:20</p>
+    <p style="margin-top:22px">Same twelve cells. One is a fuel gauge on a parked
+    car. The other is the tank you are driving on, and you have never seen it.</p>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────────────── -->
+  <section id="pace">
+    <h2>Drag these and watch the twelve cells earn their keep</h2>
+    <p>A number cannot tell you whether you are burning too fast — that needs two
+    numbers and a division. Two edges and the gap between them is a glance. Blue is
+    <span class="term" data-x="utilization">budget spent</span>, violet is
+    <span class="term" data-x="elapsed">where the clock stands</span>, and amber is
+    spend that got there first: borrowed from the end of the window.</p>
+
+    <div class="bench">
+      <div class="box flat">
+        <div class="tty hero" id="paceBox" aria-label="The bottom rule with the pace bar, driven by the two sliders below"></div>
+      </div>
+
+      <div class="dials">
+        <div class="dial a">
+          <label for="sSpent">budget spent</label>
+          <div class="val" id="vSpent">67%</div>
+          <input type="range" id="sSpent" min="0" max="100" value="67" aria-label="Budget spent, percent">
+        </div>
+        <div class="dial b">
+          <label for="sClock">clock through the five hours</label>
+          <div class="val" id="vClock">45%</div>
+          <input type="range" id="sClock" min="0" max="100" value="45" aria-label="Clock through the five hours, percent">
+        </div>
+      </div>
+
+      <p class="readout" id="readout"></p>
+      <div class="legend">
+        <div><span class="tty" id="legUnder"></span> Under the clock. The violet block
+          is where the clock stands; blue has not reached it.</div>
+        <div><span class="tty" id="legOver"></span> Over the clock. No marker is needed
+          — the colour change is where the clock stands, and the amber is borrowed.</div>
+      </div>
+    </div>
+
+  </section>
+
+  <!-- ─────────────────────────────────────────────────────────── -->
+  <section id="options">
+    <h2>Four things those cells could be</h2>
+    <p>Each drawn at the width they would really have.</p>
+
+    <div class="options">
+      <div class="option">
+        <span class="rec">option a</span>
+        <h4>Nothing. Take the cells back.</h4>
+        <div class="tty small" id="optA" aria-label="Bottom rule with no gauge at all"></div>
+        <dl>
+          <div><dt>says</dt><dd>Nothing. The rule ends after the timer.</dd></div>
+          <div><dt>costs</dt><dd>No code, so no new way to be wrong.</dd></div>
+          <div><dt>trades</dt><dd>The only label that survives a narrow pane. Every other option has to beat this.</dd></div>
+        </dl>
+      </div>
+
+      <div class="option pick">
+        <span class="rec">option b · recommended</span>
+        <h4>Budget against clock: the pace bar</h4>
+        <div class="tty small" id="optB" aria-label="Bottom rule with the pace bar showing sixty-seven percent spent and amber past the clock"></div>
+        <dl>
+          <div><dt>says</dt><dd>How much of the 5-hour window is gone, and whether you are ahead of the clock or behind it.</dd></div>
+          <div><dt>costs</dt><dd>One header read per response. Nothing extra on the wire.</dd></div>
+          <div><dt>trades</dt><dd>Only as fresh as the last response, so thinking time flatters you.</dd></div>
+        </dl>
+      </div>
+
+      <div class="option">
+        <span class="rec">option c</span>
+        <h4>One cell per agent: the swarm strip</h4>
+        <div class="tty small" id="optC" aria-label="Bottom rule with three lit agent cells and nine empty ones"></div>
+        <dl>
+          <div><dt>says</dt><dd>How many background agents are alive. Two running, one done.</dd></div>
+          <div><dt>costs</dt><dd>Nothing new. The registry already tracks every agent's status.</dd></div>
+          <div><dt>trades</dt><dd>Nine dead cells most of the time, to replace <code>2 tasks ↓</code>, which already says it in four characters. This belongs in the middle slot, not here.</dd></div>
+        </dl>
+      </div>
+
+      <div class="option">
+        <span class="rec">option d</span>
+        <h4>What the context is made of</h4>
+        <div class="tty small" id="optD" aria-label="Bottom rule with the gauge split into three coloured segments"></div>
+        <dl>
+          <div><dt>says</dt><dd>Tools and system, files read, conversation — three coloured runs instead of one fill.</dd></div>
+          <div><dt>costs</dt><dd>A category walk on every render of the rule.</dd></div>
+          <div><dt>trades</dt><dd>It answers a question you ask twice a month, and <code>/context</code> answers it better, in words.</dd></div>
+        </dl>
+      </div>
+    </div>
+
+    <details>
+      <summary>How option B would break, and what it does about it</summary>
+      <table class="breaks">
+        <thead><tr><th>What fails</th><th>How you notice</th><th>What it does</th></tr></thead>
+        <tbody>
+          <tr><td>No header — API key instead of OAuth, or another provider</td>
+              <td>The bar is blank where a number should be</td>
+              <td>Draws nothing at all. Same silent state the gauge already has before the first response.</td></tr>
+          <tr><td>Stale between turns: the clock creeps, the spend does not</td>
+              <td>Sitting and thinking slowly makes you look thrifty</td>
+              <td>Lives with it. The error only ever flatters in the safe direction.</td></tr>
+          <tr><td>First minutes of a window: dividing by a tiny elapsed</td>
+              <td>One request would read as a wild pace</td>
+              <td>No pace colour for the first few minutes. Fill only, no amber.</td></tr>
+          <tr><td>The <code>0.67</code> scale is wrong after all</td>
+              <td>The bar sits at 1% forever, or pins at full</td>
+              <td>Nothing burns. It is one number in one rule; the fix is a divisor.</td></tr>
+          <tr><td>The weekly window is the one about to bite, not the 5-hour</td>
+              <td>You hit a wall the bar said nothing about</td>
+              <td>The server names the binding one in <span class="term" data-x="representative-claim">representative-claim</span>. Open question below.</td></tr>
+        </tbody>
+      </table>
+    </details>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────────────── -->
+  <section id="answer">
+    <h2>Your call</h2>
+
+    <div class="answer">
+      <p style="margin:0 0 10px"><b>1. What goes in the twelve cells?</b></p>
+      <div class="pick-row">
+        <label><input type="radio" name="q1"> A — delete, take the columns back</label>
+        <label><input type="radio" name="q1"> B — the pace bar</label>
+        <label><input type="radio" name="q1"> C — swarm strip</label>
+        <label><input type="radio" name="q1"> D — composition</label>
+      </div>
+      <textarea placeholder="Question 1 — what goes in the twelve cells"></textarea>
+    </div>
+
+    <div class="answer">
+      <p style="margin:0 0 10px"><b>2. Which window does the bar track?</b></p>
+      <div class="pick-row">
+        <label><input type="radio" name="q2"> Always the 5-hour</label>
+        <label><input type="radio" name="q2"> Whichever <code>representative-claim</code> names</label>
+        <label><input type="radio" name="q2"> 5-hour, with the weekly colouring the label</label>
+      </div>
+      <textarea placeholder="Question 2 — which window the bar tracks"></textarea>
+    </div>
+
+    <div class="answer">
+      <p style="margin:0 0 10px"><b>3. Does the context percentage stay anywhere?</b>
+      Today you read the number, not the bar. It could keep a home in
+      <code>/context</code> only, or stay as bare text with no cells.</p>
+      <div class="pick-row">
+        <label><input type="radio" name="q3"> Bare text in the rule</label>
+        <label><input type="radio" name="q3"> Only in <code>/context</code></label>
+        <label><input type="radio" name="q3"> Text, but only past 60%</label>
+      </div>
+      <textarea placeholder="Question 3 — where the context percentage lives"></textarea>
+    </div>
+
+    <div class="answer">
+      <p style="margin:0 0 10px"><b>4. The swarm strip, separately.</b> It is a bad
+      gauge replacement but it may still be a good middle-slot label. Worth building
+      one glyph per agent instead of <code>2 tasks ↓</code>?</p>
+      <div class="pick-row">
+        <label><input type="radio" name="q4"> Yes, glyphs</label>
+        <label><input type="radio" name="q4"> No, keep the words</label>
+      </div>
+      <textarea placeholder="Question 4 — swarm strip in the middle slot"></textarea>
+    </div>
+  </section>
+
+</main>
+
+<aside class="dict" aria-label="Dictionary">
+  <h2>DICTIONARY</h2>
+  <h3>the frame</h3>
+  <dl>
+    <dt data-t="gauge">gauge</dt><dd>The twelve cells and their percentage, at the right end of the bottom rule.</dd>
+    <dt data-t="the drop order">the drop order</dt><dd>What the rule gives up as the pane narrows. The gauge goes last.</dd>
+    <dt data-t="compaction">compaction</dt><dd>Throwing the conversation away for a summary. Switched off here.</dd>
+    <dt data-t="context window">context window</dt><dd>Tokens one request can hold. One million.</dd>
+  </dl>
+  <h3>the budget</h3>
+  <dl>
+    <dt data-t="the 5-hour window">the 5-hour window</dt><dd>Anthropic's short usage claim. Refills on a fixed boundary.</dd>
+    <dt data-t="the 7-day window">the 7-day window</dt><dd>The weekly claim. Carries the Opus cutoff at half.</dd>
+    <dt data-t="utilization">utilization</dt><dd>Fraction of a window already spent. <code>0.67</code>.</dd>
+    <dt data-t="elapsed">elapsed</dt><dd>How far through the five hours the clock is. Derived from the reset header.</dd>
+    <dt data-t="pace">pace</dt><dd>Spend divided by elapsed. Above one, you run out early.</dd>
+    <dt data-t="representative-claim">representative-claim</dt><dd>A header naming which window is currently binding.</dd>
+  </dl>
+  <h3>the options</h3>
+  <dl>
+    <dt data-t="the pace bar">the pace bar</dt><dd>Spend as fill, the clock as a tick, the gap coloured by which is ahead.</dd>
+    <dt data-t="the swarm strip">the swarm strip</dt><dd>One glyph per background agent, lit while it runs.</dd>
+    <dt data-t="delete it">delete it</dt><dd>Drop the cells, keep the number as text. The baseline.</dd>
+  </dl>
+  <h3>the plumbing</h3>
+  <dl>
+    <dt data-t="after_provider_response">after_provider_response</dt><dd>The pi hook carrying response status and headers. Already used here.</dd>
+  </dl>
+</aside>
+</div>
+
+<div class="panel" id="panel" role="dialog" aria-modal="false" aria-live="polite"></div>
+
+<script>
+/* ── explain.md, as data. One entry per term the page names. ───────── */
+const X = {
+"gauge":{t:"the gauge",d:[
+ ["What","The twelve-cell bar at the right end of the prompt box's bottom rule, with a percentage after it."],
+ ["Why that name","A gauge in the fuel sense: a bounded tank, drawn full to empty. The code calls it <code>contextBar</code>."],
+ ["Where","<code>pi/kit/extensions/zen-chrome/chrome.ts</code>, function <code>contextBar</code>. Placed by <code>ChromeState.context</code> in <code>index.ts</code> beside it."],
+ ["Size","Twelve cells plus a space and up to five characters of label: eighteen columns of a rule that is usually 80 to 200 wide."],
+ ["How we work on it","<code>./preview.sh</code> in that folder draws the whole chrome at many widths without booting a terminal. <code>./test.sh</code> animates it."],
+ ["What can go wrong","Nothing dangerous. It is painted inside a try/catch because a render must never throw. Its only failure is being wrong about what it claims, which is this page."]]},
+
+"the drop order":{t:"the drop order",d:[
+ ["What","As the terminal narrows the bottom rule gives up labels in a fixed order: the turn timer first, then the background task count, then the branch is squeezed, and the gauge is the last thing standing."],
+ ["Where","<code>bottomRule</code> in <code>pi/kit/extensions/zen-chrome/chrome.ts</code>."],
+ ["So what","Whatever occupies those twelve cells is, by construction, the most important thing in the frame. That is an argument for putting the binding resource there — or for giving the slot up entirely."]]},
+
+"compaction":{t:"compaction",d:[
+ ["What","The step where the agent throws away most of the conversation and replaces it with a summary, because the context window is about to overflow."],
+ ["Why it matters here","The gauge exists to warn that compaction is coming."],
+ ["Where","pi core. Configured in <code>~/.pi/agent/settings.json</code>."],
+ ["State","<code>{\"enabled\": false}</code>. Switched off in this harness. The <code>handoff</code> extension replaces it: the model writes its own summary on demand, instead of a summariser doing it by surprise."],
+ ["So what","The gauge is the alarm for a fire that cannot start."]]},
+
+"context window":{t:"context window",d:[
+ ["What","The number of tokens the model can hold in one request."],
+ ["Where","pi's bundled catalog, <code>pi-ai/dist/providers/data/anthropic.json</code>, <code>\"anthropic-messages\".\"claude-opus-5\".contextWindow</code>."],
+ ["Size","1,000,000 tokens."],
+ ["So what","Your sessions top out around 350,000, which is 35%. The gauge warns at 70% and alarms at 90%. Four of twelve cells is the most it will ever fill, and it will never change colour."]]},
+
+"the 5-hour window":{t:"the 5-hour window",d:[
+ ["What","Anthropic's short usage claim on a Claude subscription. Every request spends from a budget that refills on a fixed five-hour boundary."],
+ ["Why that name","It is what the header calls it: <code>5h</code>."],
+ ["Where","Response header <code>anthropic-ratelimit-unified-5h-utilization</code>, on every Claude OAuth response. Free — no extra request."],
+ ["Size","A single float. <code>0.67</code> means 67% of the window is spent."],
+ ["How we would work on it","Read it in <code>after_provider_response</code>, which <code>wire.ts</code> already handles for OAuth, and publish it on <code>globalThis</code> — the same path <code>session-mode</code> already uses to hand the cache window to <code>zen-chrome</code>."],
+ ["What can go wrong","Missing on non-Anthropic providers and on API-key requests, so the bar needs a nothing-to-say state. Stale between responses: elapsed keeps moving while spend does not, so an idle session drifts toward looking thrifty. That is honest, not a bug."],
+ ["Open","Whether <code>0.67</code> means 67% or 0.67%. Two probes two minutes apart moved it 0.66 → 0.67 under ordinary work, which only makes sense as a fraction."]]},
+
+"the 7-day window":{t:"the 7-day window",d:[
+ ["What","The weekly claim. Same header family, <code>7d</code>."],
+ ["So what","It moves slowly and is the one that ends a week early. It also carries the Opus cutoff: <code>fallback-percentage: 0.5</code> means the plan drops Opus to Sonnet at half the weekly budget."],
+ ["Open","Whether the bar should ever show it, or whether <code>representative-claim</code> — which names the window currently binding — should pick."]]},
+
+"utilization":{t:"utilization",d:[
+ ["What","The fraction of a usage window already spent."],
+ ["Where","<code>anthropic-ratelimit-unified-5h-utilization</code>, a response header."],
+ ["Reading","At 22:35 on 2 September it read <code>0.67</code> while the window was 45% through its five hours. Two thirds of the budget for less than half the time."],
+ ["Open","The scale. Two probes two minutes apart moved it by 0.01 under ordinary work; on a 0–100 reading you would never exhaust a window, which contradicts people hitting these limits daily."]]},
+
+"elapsed":{t:"elapsed",d:[
+ ["What","How far through the five hours the clock is."],
+ ["Where","Derived, not sent. Five hours before <code>anthropic-ratelimit-unified-5h-reset</code> is when the window opened."],
+ ["So what","It is the pace line. Spend below it is banked; spend above it is borrowed from the end of the window."]]},
+
+"pace":{t:"pace",d:[
+ ["What","Spend divided by elapsed. Below 1.0 the budget outlasts the clock. Above 1.0 it runs out early."],
+ ["Why that name","From running. A pace band tells you whether you are ahead of the time you are chasing, without arithmetic."],
+ ["Reading at 22:35","0.67 / 0.452 = 1.48. Holding that, the budget empties at about 23:42, an hour and a half before it refills at 01:20."],
+ ["What can go wrong","Early in a window the divisor is tiny, so one request reads as a wild pace. The bar should say nothing about pace for the first few minutes rather than scream."]]},
+
+"representative-claim":{t:"representative-claim",d:[
+ ["What","A response header naming which usage window is currently the binding one: <code>five_hour</code> or <code>seven_day</code>."],
+ ["So what","It removes a design argument. The bar does not have to guess which limit to show; the server says."]]},
+
+"the pace bar":{t:"the pace bar",d:[
+ ["What","The proposed replacement, in the same twelve cells. Solid cells are spend. Where you are over the clock the fill changes colour at it, so the colour change is the mark and no cell is spent on a glyph; where you are under it, one cell out in the dot field goes violet — a cell that was holding nothing anyway."],
+ ["Why a bar and not a number","Two numbers and a division is arithmetic. Two edges and the gap between them is a glance. That gap is the whole reading."],
+ ["What it costs","Nothing on the wire. One header read per response, one value on <code>globalThis</code>, the same twelve columns already spent."],
+ ["What can go wrong","It is only as fresh as the last response. Between turns the clock creeps and the spend does not, so it slowly flatters you while you think. The direction of that error is safe."]]},
+
+"the swarm strip":{t:"the swarm strip",d:[
+ ["What","One glyph per background agent, lit while it runs and frozen on settle, in place of the <code>2 tasks ↓</code> text."],
+ ["Where it would live","<code>pi/kit/lib/agent-task-count.ts</code> makes the text; <code>ChromeState.tasks</code> in <code>zen-chrome/index.ts</code> places it."],
+ ["Why it is not the gauge's replacement","The count is usually zero to three. Twelve cells of mostly nothing is worse than the four characters it already costs. It belongs in the slot that already appears and disappears with the agents."],
+ ["Open","Whether glyphs beat <code>2 tasks ↓</code> at all, given neither says anything about progress — agents report only start and settle."]]},
+
+"delete it":{t:"delete it",d:[
+ ["What","The baseline: drop the twelve cells, keep the percentage as plain text, give the rule eighteen quieter columns."],
+ ["Why it is on the page","Any replacement has to beat doing nothing. A quieter frame is a real gain and costs no code that can go wrong."],
+ ["What it trades","The one visual that survives a narrow pane. And the percentage it keeps is a percentage of a limit that does not bind."]]},
+
+"after_provider_response":{t:"after_provider_response",d:[
+ ["What","The pi extension hook that fires when an HTTP response arrives, before its body is read. It carries the status code and the headers."],
+ ["Where","<code>pi/kit/extensions/wire.ts</code> line 366 already listens to it, for OAuth requests only, to remember the request id."],
+ ["So what","The data for the pace bar arrives at a door the harness already opens."]]}
+};
+
+/* ── the terminal rule renderer ───────────────────────────────────────
+   Builds a real rule of `cols` columns: corners, dashes, and labels let
+   into them, same shape as bottomRule in chrome.ts. `parts` are the
+   right-hand cluster; `left` is the branch. */
+const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;");
+const span = (cls,text) => `<span class="${cls}">${esc(text)}</span>`;
+const bare = parts => parts.reduce((n,p)=>n+[...p[1]].length,0);
+
+function ruleHTML(cols,left,right){
+  const L = left.length ? 3 + bare(left) : 0;
+  const R = right.length ? 3 + bare(right) : 0;
+  const gap = Math.max(1, cols - 2 - L - R);
+  let out = span("bd","╰");
+  if (left.length) out += span("bd","─") + " " + left.map(p=>span(p[0],p[1])).join("") + " ";
+  out += span("bd","─".repeat(gap));
+  if (right.length) out += " " + right.map(p=>span(p[0],p[1])).join("") + " " + span("bd","─");
+  return out + span("bd","╯");
+}
+
+/* Twelve cells of pace bar. spent and clock are 0..1.
+
+   Over the clock, the colour change *is* the mark: everything left of it is
+   on schedule, everything right of it is borrowed, and no cell is spent on a
+   glyph. Under the clock there is no colour change to carry the mark, so one
+   cell out in the dot field becomes a solid violet block — a cell that was
+   holding nothing anyway. The bar never trades a cell of data for a marker. */
+const CELLS = 12;
+const TICK = "▌";
+function paceCells(spent, clock){
+  const s = Math.round(Math.max(0,Math.min(1,spent)) * CELLS);
+  const c = Math.min(CELLS - 1, Math.round(Math.max(0,Math.min(1,clock)) * CELLS));
+  const out = [];
+  const push = (cls, n) => { if (n > 0) out.push([cls, (cls==="dots"?"⣿":"█").repeat(n)]); };
+  if (c >= s){                      // under: fill, dots, the clock, dots
+    push("spend", s);
+    push("dots", c - s);
+    out.push(["tick", TICK]);
+    push("dots", CELLS - c - 1);
+  } else {                          // over: on schedule, borrowed, dots
+    push("spend", c);
+    push("hot", s - c);
+    push("dots", CELLS - s);
+  }
+  return out;
+}
+const cellsHTML = cells => cells.map(p => span(p[0], p[1])).join("");
+function ctxCells(pct){
+  const s = Math.round(pct/100*CELLS);
+  const o=[]; if(s) o.push(["spend","█".repeat(s)]);
+  if(CELLS-s) o.push(["dots","⣿".repeat(CELLS-s)]);
+  return o;
+}
+const BRANCH = [["ac","main"]];
+const TIMER  = [["ac","1m 12s "]];
+
+/* ── the fixed pictures ─────────────────────────────────────────────── */
+const HERO_COLS = 58, OPT_COLS = 46;
+
+/* Where the gauge starts, in columns. The rule ends ` ` + right + ` ` + `─` + `╯`,
+   so the right cluster's last column is cols-4 and the gauge follows the timer. */
+function gaugeColumn(cols, right){
+  return cols - 3 - bare(right) + [...TIMER[0][1]].length;
+}
+
+function drawHero(){
+  const right = [...TIMER, ...ctxCells(35), ["md"," 35.0%"]];
+  document.getElementById("heroBox").innerHTML = ruleHTML(HERO_COLS, BRANCH, right);
+  // "twelve cells" is twelve characters wide, so the label is the measurement.
+  const pad = " ".repeat(gaugeColumn(HERO_COLS, right));
+  document.getElementById("heroCallout").innerHTML =
+    pad + "└" + "─".repeat(CELLS - 2) + "┘\n" + pad + "twelve cells";
+
+  document.getElementById("winCtx").innerHTML  = cellsHTML(ctxCells(35)) + span("md"," 35.0%");
+  document.getElementById("winRate").innerHTML = cellsHTML(paceCells(0.67,0.452)) + span("hot"," 67%");
+  document.getElementById("legUnder").innerHTML = cellsHTML(paceCells(0.30,0.50));
+  document.getElementById("legOver").innerHTML  = cellsHTML(paceCells(0.67,0.45));
+
+  const c = OPT_COLS;
+  document.getElementById("optA").innerHTML = ruleHTML(c, BRANCH, TIMER);
+  document.getElementById("optB").innerHTML =
+    ruleHTML(c, BRANCH, [...TIMER, ...paceCells(0.67,0.452), ["hot"," 67%"]]);
+  document.getElementById("optC").innerHTML =
+    ruleHTML(c, BRANCH, [...TIMER, ["agentrun","██"], ["agentdone","█"], ["dots","⣿".repeat(9)], ["md"," 3"]]);
+  document.getElementById("optD").innerHTML =
+    ruleHTML(c, BRANCH, [...TIMER, ["seg1","███"], ["seg2","█"], ["seg3","█"], ["dots","⣿".repeat(7)], ["md"," 35%"]]);
+}
+
+/* ── the signature: pace bench ──────────────────────────────────────── */
+const WIN_START = "20:20", WIN_END = "01:20", WIN_MIN = 300;
+function hhmm(minsFromStart){
+  const base = 20*60 + 20 + minsFromStart;
+  const h = Math.floor(base/60) % 24, m = Math.round(base%60);
+  return String(h).padStart(2,"0") + ":" + String(m).padStart(2,"0");
+}
+function dur(mins){
+  const h = Math.floor(mins/60), m = Math.round(mins%60);
+  return (h ? h+"h " : "") + m + "m";
+}
+function drawPace(){
+  const spent = +document.getElementById("sSpent").value;
+  const clock = +document.getElementById("sClock").value;
+  document.getElementById("vSpent").textContent = spent + "%";
+  document.getElementById("vClock").textContent = clock + "%";
+
+  const cells = paceCells(spent/100, clock/100);
+  const hot = spent > clock;
+  document.getElementById("paceBox").innerHTML =
+    ruleHTML(HERO_COLS, BRANCH, [...TIMER, ...cells, [hot?"hot":"md", " " + spent + "%"]]);
+
+  const out = document.getElementById("readout");
+  out.classList.toggle("ok", !hot);
+  if (spent >= 100){
+    out.innerHTML = "<b>Spent.</b> Nothing left until the window refills at " + WIN_END + ".";
+  } else if (clock < 6){
+    out.innerHTML = "<b>Too early to say.</b> The window just opened, so pace divides by almost nothing. The bar shows fill only — no amber for the first few minutes.";
+  } else if (!hot){
+    const head = clock - spent;
+    out.innerHTML = "<b>Under the clock by " + head + " points.</b> At this rate the window outlasts you: it refills at " + WIN_END + " with budget still in it.";
+  } else {
+    const emptyAt = (clock/spent) * WIN_MIN;
+    const early = WIN_MIN - emptyAt;
+    out.innerHTML = "<b>Burning " + (spent/clock).toFixed(2) + "× the clock.</b> Holding this, the budget empties at " +
+      hhmm(emptyAt) + " — " + dur(early) + " before it refills at " + WIN_END + ".";
+  }
+}
+
+/* ── explain panels: click to open, origin-aware, Escape to close ───── */
+const panel = document.getElementById("panel");
+let openTerm = null;
+function closePanel(){
+  if (!openTerm) return;
+  panel.classList.remove("open"); panel.classList.add("closing");
+  setTimeout(()=>panel.classList.remove("closing"),100);
+  openTerm = null;
+}
+function openPanel(el){
+  const key = el.dataset.x || el.dataset.t;
+  const e = X[key];
+  if (!e){ return; }
+  if (openTerm === el){ closePanel(); return; }
+  panel.innerHTML = "<h4>" + e.t + "</h4><dl>" +
+    e.d.map(([k,v]) => "<div><dt>" + k + "</dt><dd>" + v + "</dd></div>").join("") + "</dl>";
+  const r = el.getBoundingClientRect();
+  const w = Math.min(480, window.innerWidth - 32);
+  let x = Math.min(r.left, window.innerWidth - w - 16);
+  panel.style.left = Math.max(16, x) + "px";
+  panel.style.width = w + "px";
+  // Placed on whichever side has room, and never taller than the room it has,
+  // so a long entry scrolls inside the panel instead of off the screen.
+  const below = window.innerHeight - r.bottom, above = r.top;
+  if (below > 260 || below > above){
+    panel.style.top = (r.bottom + 8) + "px"; panel.style.bottom = "auto";
+    panel.style.maxHeight = (below - 24) + "px";
+    panel.style.setProperty("--origin","top left");
+  } else {
+    panel.style.bottom = (window.innerHeight - r.top + 8) + "px"; panel.style.top = "auto";
+    panel.style.maxHeight = (above - 24) + "px";
+    panel.style.setProperty("--origin","bottom left");
+  }
+  panel.classList.add("open");
+  openTerm = el;
+  lightDict(key);
+}
+function lightDict(key){
+  document.querySelectorAll(".dict dt").forEach(dt => {
+    const on = dt.dataset.t === key;
+    dt.classList.toggle("lit", on);
+    if (on) dt.scrollIntoView({block:"nearest"});
+  });
+}
+
+/* every term and every dictionary entry is a trigger */
+function wire(el){
+  el.tabIndex = 0;
+  el.setAttribute("role","button");
+  el.addEventListener("click", ev => { ev.stopPropagation(); openPanel(el); });
+  el.addEventListener("keydown", ev => {
+    if (ev.key === "Enter" || ev.key === " "){ ev.preventDefault(); ev.stopPropagation(); openPanel(el); }
+  });
+  el.addEventListener("mouseenter", () => lightDict(el.dataset.x || el.dataset.t));
+}
+document.querySelectorAll(".term").forEach(wire);
+document.querySelectorAll(".dict dt").forEach(dt => { dt.classList.add("term"); wire(dt); });
+
+document.addEventListener("click", ev => { if (!panel.contains(ev.target)) closePanel(); });
+document.addEventListener("keydown", ev => { if (ev.key === "Escape") closePanel(); });
+
+/* ── strip: which section you are in ────────────────────────────────── */
+const stations = [...document.querySelectorAll(".station")];
+const spy = new IntersectionObserver(entries => {
+  entries.forEach(en => {
+    if (!en.isIntersecting) return;
+    stations.forEach(s => s.classList.toggle("on", s.getAttribute("href") === "#" + en.target.id));
+  });
+}, {rootMargin:"-40% 0px -55% 0px"});
+["now","dead","unseen","pace","options"].forEach(id => {
+  const el = document.getElementById(id); if (el) spy.observe(el);
+});
+
+/* ── theme ──────────────────────────────────────────────────────────── */
+const toggle = document.getElementById("themeToggle");
+const stored = localStorage.getItem("theme");
+if (stored === "light") document.documentElement.setAttribute("data-theme","light");
+toggle.addEventListener("click", () => {
+  const light = document.documentElement.getAttribute("data-theme") === "light";
+  if (light){ document.documentElement.removeAttribute("data-theme"); localStorage.setItem("theme","dark"); }
+  else { document.documentElement.setAttribute("data-theme","light"); localStorage.setItem("theme","light"); }
+});
+
+/* ── go ─────────────────────────────────────────────────────────────── */
+document.getElementById("sSpent").addEventListener("input", drawPace);
+document.getElementById("sClock").addEventListener("input", drawPace);
+window.addEventListener("resize", drawHero);
+drawHero(); drawPace();
+</script>
+</body>
+</html>

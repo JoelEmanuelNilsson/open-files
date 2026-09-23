@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+#
+# The keyboard backlight, as a three-position switch: off, low, full.
+#
+# A continuous dimmer is what the hardware offers and it is the wrong control
+# for a status bar. In practice there are three settings anyone ever wants --
+# dark room, normal, off -- so a click steps between exactly those and every
+# press lands somewhere you meant to be. A scroll-to-dim would need five
+# gestures to cross the same range and would stop at values you would never
+# have chosen deliberately.
+#
+# The bar is not updated from here. sysprobe holds a CoreBrightness
+# notification and reports the level whenever it moves, so the icon follows
+# whether the change came from this click, from the F5 and F6 keys, or from
+# the ambient light sensor deciding for itself.
+
+PROBE="$CONFIG_DIR/bin/sysprobe"
+
+LOW=0.25
+HIGH=1.0
+
+cur=$("$PROBE" kbd get 2>/dev/null)
+
+# Compare as integers in hundredths: bash has no floating point, and the value
+# arrives as a fixed three-decimal string.
+hundredths=$(printf '%s' "$cur" | awk -F. '{printf "%d", ($1 * 100) + substr($2 "00", 1, 2)}' 2>/dev/null)
+: "${hundredths:=0}"
+
+if   [ "$hundredths" -le 2  ]; then "$PROBE" kbd set "$LOW"    # off  -> low
+elif [ "$hundredths" -le 60 ]; then "$PROBE" kbd set "$HIGH"   # low  -> full
+else                                "$PROBE" kbd set 0.0       # full -> off
+fi

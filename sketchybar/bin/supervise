@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+#
+# Keep the resident processes alive, and make sure there is exactly one of each.
+#
+# The problem this solves: `sketchybar --reload` re-runs sketchybarrc without
+# stopping anything the previous run started. Every config that launches a
+# background helper from sketchybarrc leaks one copy per reload, and the
+# symptom is a bar that gets slower every time you edit it. Editing a bar is
+# exactly the activity during which you reload it fifty times, so this is not a
+# rare case.
+#
+# The obvious fix is a pidfile plus `kill -TERM -$pid` to take out the whole
+# process group, and it does not work. A background job started from
+# sketchybarrc is not a process group leader -- it inherits sketchybar's group
+# -- so the negative pid names either nothing or something you very much did
+# not mean, and macOS ships no `setsid` to fix that with. Measured before this
+# was rewritten: one reload left five orphans behind, still updating the bar
+# alongside their own replacements.
+#
+# So processes are found by what they are, not by who started them. Every
+# pattern below is an absolute path containing this config's own directory,
+# which makes it unique to this bar and indifferent to how deep inside a
+# pipeline any given process happens to sit.
+
+set -u
+
+CONFIG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/sketchybar"
+mkdir -p "$STATE"
+PIDFILE="$STATE/supervise.pid"
+
+# Everything this bar is allowed to have running. The last three are named
+# because none carries our directory in its command line: `aerospace
+# subscribe` and `borders` are spawned by the bridge, and media-control's
+# helper reparents to init when its wrapper dies. None goes away on its own.
+OWNED=(
+  "$CONFIG_DIR/bin/sysprobe"
+  "$CONFIG_DIR/bin/hide-menubar"
+  "$CONFIG_DIR/bin/pump"
+  "$CONFIG_DIR/bin/bridge-aerospace"
+  "$CONFIG_DIR/bin/bridge-media"
+  "$CONFIG_DIR/bin/supervise"
+  "mediaremote-adapter.pl"
+  "aerospace subscribe"
+  "/opt/homebrew/bin/borders"
+)
+
+# TERM everything that matches except us, give traps a moment to run, then KILL
+# whatever ignored it. Used both to clear the previous generation at startup and
+# to take our own children with us on the way out.
+stop_others() {
+  local pat pid found=0
+  for pat in "${OWNED[@]}"; do
+    for pid in $(pgrep -f "$pat" 2>/dev/null); do
+      [ "$pid" = "$$" ] && continue
+      kill -TERM "$pid" 2>/dev/null && found=1
+    done
+  done
+  [ "$found" = "1" ] || return 0
+  sleep 0.4
+  for pat in "${OWNED[@]}"; do
+    for pid in $(pgrep -f "$pat" 2>/dev/null); do
+      [ "$pid" = "$$" ] && continue
+      kill -KILL "$pid" 2>/dev/null
+    done
+  done
+}
+
+# Claim ownership BEFORE sweeping, and the order is the whole trick.
+#
+# Sweeping first looks right and oscillates: the old generation is killed, its
+# EXIT trap fires, and its cleanup sweeps away the new generation that has just
+# replaced it. Two reloads then alternate between a working bar and no bar at
+# all, which is exactly what was measured here before this line moved.
+#
+# Writing the pidfile first makes the handover unambiguous. A supervise that
+# finds someone else's pid in the file knows it has been superseded, and a
+# superseded generation must not touch anything on its way out.
+echo $$ > "$PIDFILE"
+stop_others
+
+cleanup() {
+  trap - EXIT INT TERM
+  # Superseded: someone else owns these processes now, so leave them alone.
+  [ "$(cat "$PIDFILE" 2>/dev/null)" = "$$" ] || exit 0
+  stop_others
+  rm -f "$PIDFILE"
+}
+trap cleanup EXIT INT TERM
+
+# ── Run one job, restarting it if it dies ───────────────────────────────────
+# Backoff is deliberately coarse. If sysprobe is crashing on startup, a tight
+# restart loop turns a broken item into a pegged core; two seconds makes the
+# failure show up in `top` as an idle bar rather than a hot one.
+keep() {
+  while :; do
+    "$@" >/dev/null 2>&1
+    sleep 2
+  done
+}
+
+keep /bin/sh -c "'$CONFIG_DIR/bin/sysprobe' stream 1 | '$CONFIG_DIR/bin/pump'" &
+keep "$CONFIG_DIR/bin/bridge-aerospace" &
+keep "$CONFIG_DIR/bin/bridge-media" &
+
+# The menu bar stays hidden only while this is alive -- the WindowServer keys
+# the override to the connection that sent it. Running it here rather than as
+# its own LaunchAgent ties the hiding to the bar's life on purpose: if the bar
+# is not running, you should get your menu bar back rather than be left with a
+# blank strip and no way to reach a menu.
+keep "$CONFIG_DIR/bin/hide-menubar" &
+
+wait

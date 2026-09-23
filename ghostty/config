@@ -1,0 +1,136 @@
+# Ghostty Configuration
+# Shared by Ghostty and Cmux.
+
+# ============================================================================
+# Font Configuration
+# ============================================================================
+# The primary font, its size, its cell metrics and its Nerd Font fallback live
+# in font.conf. No font-family here: Ghostty loads an included file after the
+# file that includes it, so any font-family here would win as the primary.
+config-file = font.conf
+# Window transparency for the current appearance. See the Theme section below.
+config-file = ?themes/glass
+# Heavier stems at small sizes. Off: with a near-white foreground on a
+# near-black background the extra weight adds to the halation rather than
+# fighting it. Flip back if the text reads thin.
+font-thicken = false
+# The home directory's marker. Anything that would print `~` for `$HOME` prints
+# U+100000 instead, and this line is what makes that codepoint the Koenigsegg
+# ghost: a one-glyph font built by `pi/kit/bin/build-ghost-font.py` and
+# installed to ~/Library/Fonts/GhostInsignia.ttf. The glyph is one cell wide,
+# because Ghostty draws a mapped font at its own metrics without constraining
+# it to the grid. Outside Ghostty the codepoint has no font and shows a box, so
+# only surfaces that live in this terminal use it: the starship prompt
+# (starship/starship.toml) and pi's chrome (pi/kit/lib/home-glyph.ts).
+font-codepoint-map = U+100000=Ghost Insignia
+# The old 12.2% cell height solved the grid to divide the window height exactly;
+# readability wins over that, so cell height is now a per-font number in fonts/.
+
+# ============================================================================
+# Cursor Configuration
+# ============================================================================
+cursor-style = block
+cursor-style-blink = false
+
+# ============================================================================
+# Theme
+# ============================================================================
+# Both names are symlinks in themes/ (-> theme/gen/ghostty) written by
+# `bin/theme apply NAME`; macOS appearance picks between them, and every ANSI
+# consumer in the terminal follows. See theme/README.md.
+theme = dark:current-dark,light:current-light
+
+# Window transparency, which cannot live in the theme file with the rest of the
+# theme: Ghostty drops every non-colour key from a file loaded as a `theme`,
+# silently. `bin/theme` writes themes/glass with the opacity and blur of the
+# mode macOS is in right now, and rewrites it on every appearance flip. `?`
+# makes the include optional, so a fresh clone starts before the first apply.
+
+# ============================================================================
+# Terminal Behavior
+# ============================================================================
+# Terminal type
+shell-integration = detect
+
+# Allow OSC-based desktop notifications (needed for Codex TUI notifications)
+desktop-notifications = true
+
+# Scrollback
+scrollback-limit = 50000000
+
+# ============================================================================
+# Window Settings
+# ============================================================================
+# Window padding
+#
+# A cell grid can never exactly fill an arbitrary window height: ghostty uses
+# rows = floor(height / cell_height) and dumps the sub-cell remainder at the
+# bottom (renderer/size.zig, Padding.leftover). Tiled full-height windows show
+# that remainder as a dead strip under the last row.
+#
+# `balance` splits the remainder across the edges instead — but it also caps the
+# top at (padding_left + padding_right + cell_width) / 2 (Surface.balancePadding
+# in renderer/size.zig), and anything over the cap is pushed back to the bottom.
+# With x-padding of 2pt that cap is 14px, which is why the strip stayed at the
+# bottom. Widening the side padding lifts the cap above half a cell, so the
+# remainder really does split evenly, at any window height or screen.
+#
+# y-padding is 0 because every point of it is taken from the rows. A full-height
+# tile on the laptop is 2168px and a cell is 57px (font.conf: 16pt Intel One Mono,
+# 44px face x 1.3). With 5pt of padding at the top and bottom, 2148px holds 37
+# rows and leaves 39px unused. With 0, 2168px holds 38 rows and leaves 2px.
+window-padding-x = 5
+window-padding-y = 0
+window-padding-balance = true
+
+# The macOS frame, with its titlebar hidden. The rounded corners belong to the
+# frame, so this is what it costs to have them: macOS also draws a one-pixel
+# light rim, visible as an outline against a dark wallpaper. `none` drops the
+# frame and with it both -- square corners, no rim.
+# Takes effect on a new Ghostty process, not on a config reload.
+window-decoration = auto
+macos-window-shadow = false
+# Hides the titlebar without dropping the frame: without it the window wears a
+# real titlebar, and the glass stops at its bottom edge.
+macos-titlebar-style = hidden
+
+# ============================================================================
+# The right Option key
+# ============================================================================
+# By default macOS uses both Option keys to type accented characters, so no
+# terminal program ever sees an Alt keypress and every Alt shortcut is dead.
+# This gives the RIGHT Option key to the terminal as a real Alt key. The LEFT
+# one is untouched, so ñ, ç, @, # and the rest of the Spanish layout still
+# work exactly as before. Right Option was the key you never used; now it is
+# a whole extra modifier.
+macos-option-as-alt = right
+keybind = shift+enter=text:\x1b\r
+keybind = alt+backspace=text:\x17
+keybind = super+u=text:ultrathink
+# cmd-t opens a window, not a tab. Native tabs work again now that the frame is
+# back, but aerospace tiles windows and has no idea what a tab is, so a tab is a
+# pane it cannot reach. This keeps cmd-t meaning what it meant under `none`.
+keybind = super+t=new_window
+
+# Terminal font sizing
+# Physical `+` key on the active Spanish ISO layout (the key beside Enter).
+keybind = all:super+bracket_right=increase_font_size:1
+keybind = all:super+shift+bracket_right=increase_font_size:1
+keybind = super+-=decrease_font_size:1
+keybind = super+0=reset_font_size
+
+# Reload the config with Cmd+Shift+, -- the key beside `m` on the Spanish ISO
+# layout. Ghostty ships `super+shift+,`, but on that layout shift+comma types
+# `;`, so the keypress can arrive as `;` and miss a binding written as `,`.
+# `physical:` would settle it by matching the key by position, except that
+# Ghostty 1.3.1's physical key set has no `comma` (nor period, semicolon,
+# slash, minus or equal -- only letters, digits, brackets, arrows and the
+# keypad). So both characters the one key can produce are bound to the same
+# action, which costs nothing and covers either translation.
+keybind = all:super+shift+,=reload_config
+keybind = all:super+shift+;=reload_config
+
+# Disable Cmd+K because Ghostty's default is clear_screen, which wipes visible
+# terminal scrollback and is easy to hit accidentally.
+keybind = super+k=unbind
+

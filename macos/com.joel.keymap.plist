@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.joel.keymap</string>
+
+  <!-- ¡ (the key right of ?, HID usage 0x2E, "equal" in US names) becomes
+       F12 at the HID layer, so it never types a character in any app. Herdr
+       binds F12 as its prefix key (herdr/config.toml [keys]). A printable
+       prefix would both open the prefix and type the glyph; F12 has no glyph,
+       and the physical F12 sends volume-up, not F12, while
+       com.apple.keyboard.fnState is off — so nothing collides.
+
+       F12 (usage 0x45), not F13 (0x68). F13 was tried first and the prefix
+       sometimes failed to open. Why is not known: Herdr accepts
+       `prefix = "f13"`, and its binary carries F13's ESC [25~ alongside the
+       sequences it does act on. So this rests on the measurement and states
+       no mechanism. F12 has been reliable.
+
+       What F12 costs is that it is a real key. Nothing collides while
+       com.apple.keyboard.fnState is off, because the physical F12 then sends
+       volume-up rather than F12 — but turn fnState on, or press fn+F12, and
+       that key opens the prefix. F13 has no physical key at all and carries
+       no such caveat, which is why it is worth returning to if the F13 fault
+       is ever understood.
+
+       hidutil mappings are lost at logout and on keyboard reconnect, so this
+       runs at login. Dst is the 64-bit HID usage: 0x700000000 | usage. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/hidutil</string>
+    <string>property</string>
+    <string>--set</string>
+    <string>{"UserKeyMapping":[{"HIDKeyboardModifierMappingSrc":0x70000002E,"HIDKeyboardModifierMappingDst":0x700000045}]}</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>

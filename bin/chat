@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# chat — pi as a pure Q&A seat, near-zero standing tokens.
+#
+# PI_CHAT=1 is read by kit/extensions/wire.ts: the system array becomes the
+# Claude Code invariant plus one owned block ("You are Joel's personal chat
+# assistant." and APPEND_SYSTEM.md, the house style) and the tools are cut to
+# web search and bash — look, never edit. Everything else here is belt and braces:
+# --no-skills keeps the skills list out of the prompt options, and a
+# separate session dir keeps chat history out of the coding sessions.
+#
+# claude.ai charges a whole coding context per question; this seat charges
+# roughly the question.
+set -euo pipefail
+
+mkdir -p "$HOME/.pi/agent/chat-sessions"
+
+PI_CHAT=1 exec pi \
+	--no-skills \
+	--model "anthropic/claude-opus-5-5:medium" \
+	--session-dir "$HOME/.pi/agent/chat-sessions" \
+	"$@"

@@ -1,0 +1,225 @@
+#!/usr/bin/env bash
+#
+# The bar.
+#
+# Shape follows Ghostty and herdr: sharp corners, no margin, edge to edge.
+#
+# ── How it is wired ────────────────────────────────────────────────────────
+#
+# Almost nothing here polls. The conventional sketchybar config gives every
+# item a script and an update_freq, which is one fork per item per second; this
+# one has four processes total and they are all push-driven:
+#
+#   bin/sysprobe    resident. cpu, memory, battery, keyboard backlight, audio
+#                   device, volume and network from inside one process. Emits a
+#                   line a second, and an extra line the instant the volume or
+#                   the audio device changes.
+#   bin/pump        reads those lines and turns each one into a single batched
+#                   sketchybar call. One fork per second for the whole bar.
+#   bin/bridge-aerospace   `aerospace subscribe` -> workspace and leader-layer
+#                   events. Zero cost at rest.
+#   bin/bridge-media       `media-control stream` -> now playing. Zero cost at
+#                   rest, and it covers Spotify and Chrome equally because it
+#                   reads what macOS itself knows.
+#
+# ── Why the bar is not below the menu bar ──────────────────────────────────
+#
+# topmost=on puts this above the system menu bar rather than below it, and the
+# menu bar is set to auto-hide (install.sh checks). That combination means the
+# Apple menu is gone for good, including when you push the pointer at the top
+# edge -- which is the point. Every other surface here has already lost its
+# chrome: Ghostty has no titlebar, AeroSpace draws nothing, herdr puts its tabs
+# at the bottom. App menus are still reachable from the keyboard.
+
+CONFIG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export CONFIG_DIR
+export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:$PATH"
+
+# What this machine is, then what the bar looks like on it, then the glyphs.
+#
+# The order is load-bearing: lib/skin.sh resolves the palette and the skin, and
+# lib/icons.sh sizes every glyph from the chip height the skin picked. Sourcing
+# icons first gives you the fallback sizes and no warning.
+source "$CONFIG_DIR/lib/geometry.sh"
+source "$CONFIG_DIR/lib/skin.sh"
+source "$CONFIG_DIR/lib/icons.sh"
+
+# ── Why the bar is gone in fullscreen ──────────────────────────────────────
+#
+# show_in_fullscreen=off. A window that asks for a fullscreen space is asking
+# for the whole display, and a strip pinned over its top edge is the one thing
+# that answer cannot include -- a film loses its top 32 points to a clock.
+#
+# It also costs frames. The bar is topmost, so any window above a fullscreen
+# surface makes WindowServer composite every frame instead of handing the
+# display to the app directly. plugins/game-hide was written for exactly that,
+# app by app, off a list of names; this is the general form of it, and it needs
+# no list, because "occupies a fullscreen space" is a fact macOS already knows.
+# The list stays for the games that take the screen without asking for a space.
+#
+# sticky=on and this are not in conflict: sticky puts the bar on every ordinary
+# space, and a fullscreen space is not one.
+
+# ── The bar ─────────────────────────────────────────────────────────────────
+#
+# The bar draws nothing itself -- a 32-point window whose only jobs are to hold
+# the items and to sit above the menu bar.
+sketchybar --bar \
+  color="$CHROME_BAR" \
+  height="$BAR_HEIGHT" \
+  position=top \
+  corner_radius=0 \
+  border_width=0 \
+  margin=0 \
+  y_offset=0 \
+  blur_radius="$BAR_BLUR" \
+  topmost=on \
+  sticky=on \
+  show_in_fullscreen=off \
+  font_smoothing=on \
+  shadow=off \
+  notch_width="$NOTCH_WIDTH" \
+  padding_left="$BAR_PAD_LEFT" \
+  padding_right="$BAR_PAD_RIGHT"
+
+# ── Defaults every item inherits ────────────────────────────────────────────
+# Every shape here comes from the skin, and it is set once so no item can
+# disagree with the rest of the bar by forgetting one. A chip's radius and
+# border width in particular: they are the difference between an outlined box
+# and a filled cell, and an item that sets its own would be the one item still
+# wearing the old skin after a switch.
+#
+# ── THE GLYPH CELL ─────────────────────────────────────────────────────────
+# Every glyph on this bar is drawn inside a square, BOX_HEIGHT on a side. An
+# item with nothing but a glyph in it is therefore that square, and an item
+# with a label is the square plus the label.
+#
+# icon.width is what makes it a square, and it has to be stated, because the
+# width sketchybar measures for a glyph is not the glyph's advance: it is the
+# ink's right edge rounded up, with the left side bearing dropped. A 20-point
+# chip came out 23 wide, an oval rather than a circle, and every glyph in one
+# sat 0.75pt left of the middle. See lib/icons.sh.
+#
+# icon.padding_left is the other half and cannot be set here, because it is per
+# glyph: it is the number that centres *that* ink in the cell, and it comes out
+# of lib/icons.sh as PAD_<name> beside PT_<name>. Each item passes both, in the
+# same breath as the glyph itself, which is the rule the point size already
+# followed.
+#
+# The paddings are zero because the cell already holds the air. A label pays
+# for its own, on the right, where it lives.
+sketchybar --default \
+  updates=when_shown \
+  label.color="$CHROME_TEXT" \
+  icon.color="$CHROME_TEXT" \
+  label.font="$FONT_LABEL:Medium:$SIZE_LABEL" \
+  icon.width="$BOX_HEIGHT" \
+  icon.align=left \
+  icon.padding_left=0 \
+  icon.padding_right=0 \
+  label.padding_left=0 \
+  label.padding_right=0 \
+  icon.y_offset="$BOX_LIFT" \
+  label.y_offset="$BOX_LIFT" \
+  icon.highlight_color="$CHROME_ON_CELL" \
+  label.highlight_color="$CHROME_ON_CELL" \
+  padding_left=0 \
+  padding_right=0 \
+  background.corner_radius="$CHIP_RADIUS" \
+  background.height="$BOX_HEIGHT" \
+  background.y_offset="$BOX_LIFT" \
+  background.color="$CHROME_CHIP" \
+  background.border_color="$CHROME_BORDER" \
+  background.border_width="$CHIP_BORDER" \
+  background.drawing=off
+
+# ── Spacers ─────────────────────────────────────────────────────────────────
+#
+# The gap between two chips is an item, not a property. That looks like a
+# workaround and is the opposite: a bracket's background covers its members
+# *including their padding*, so padding between two brackets is inside one of
+# them and separates nothing. Every attempt to space chips with padding gives a
+# different answer depending on whether each side is a bracket or a plain item,
+# which is how this bar ended up with gaps of 0, 6, 6 and 12 points.
+#
+# A spacer belongs to no bracket, so nothing can absorb it, and one number in
+# lib/geometry.sh moves every gap on the bar at once.
+# A third argument overrides the width, which is how the rooms keep the lit
+# cell clear of its neighbours: a narrow spacer at each end of the row.
+# icon.width=0 because a spacer inherits the glyph cell from --default and has
+# no glyph to put in it: a 20-point cell inside an 8-point gap is a fight the
+# gap does not need to have.
+spacer() {
+  sketchybar --add item "$1" "$2" \
+             --set "$1" width="${3:-$GAP_CHIP}" \
+                        icon.width=0 \
+                        icon.drawing=off \
+                        label.drawing=off \
+                        background.drawing=off
+}
+
+# ── Text widths, measured ───────────────────────────────────────────────────
+#
+# The width sketchybar would give TEXT in FONT, asked of sketchybar itself.
+# For a number that must not change width as it ticks: "00%" is every
+# two-digit reading.
+#
+# A leading space cannot hold the place of a missing digit. sketchybar sizes
+# text by its ink, from the first mark to the last, so a blank in front adds
+# nothing -- " 7%" measured 9 points narrower than "33%", and so did a figure
+# space and a no-break space. A stated label.width is the only fixed width.
+#
+# Measured rather than computed from the face's advance, because the ink box
+# is not the advance (sketchybar rounds its right edge up and drops the left
+# bearing), and because the font is the skin's to change. A query answers
+# as soon as the item exists; no draw is needed.
+text_width() {
+  sketchybar --add item probe.width left \
+             --set probe.width icon.drawing=off icon.width=0 \
+                               label="$1" label.font="$2" \
+                               label.padding_left=0 label.padding_right=0 \
+                               background.drawing=off
+  sketchybar --query probe.width | jq -r '.bounding_rects[].size[0] | floor'
+  sketchybar --remove probe.width
+}
+
+# ── Chips ───────────────────────────────────────────────────────────────────────
+#
+# One bracket per group, named chip.<group>, behind its members. Every group
+# has one whatever the skin, and the skin decides what it looks like through
+# CHROME_CHIP and CHROME_BORDER -- glass paints them transparent, which is how
+# one layout serves a strip and a row of islands alike. plugins/appearance
+# repaints them by that prefix, so a chip added here is repainted on every
+# flip without anyone listing it.
+#
+# Colour first and background.drawing last: see lib/rooms.sh.
+chip() {
+  local name="chip.$1"; shift
+  sketchybar --add bracket "$name" "$@" \
+             --set "$name" background.color="$CHROME_CHIP" \
+                           background.border_color="$CHROME_BORDER" \
+                           background.drawing=on
+}
+
+# media_update is triggered by the bridge in bin/.
+# appearance_change is macOS's own dark/light notification; plugins/appearance
+# follows it (glyph, bar colours, wallpaper).
+# agent_done is fired by whatever just finished talking to you -- pi's
+# extensions/bar-light.ts and Claude Code's Stop hook both run
+# `sketchybar --trigger agent_done`. Anything that can run one command can
+# light the bar, which is the whole interface; see plugins/agent-light.
+sketchybar --add event media_update \
+           --add event agent_done \
+           --add event appearance_change AppleInterfaceThemeChangedNotification
+
+source "$CONFIG_DIR/items/left.sh"
+source "$CONFIG_DIR/items/right.sh"
+
+# ── The resident processes ──────────────────────────────────────────────────
+# Started last so every item they talk to already exists. `pkill -f` on the
+# exact path first: sketchybar --reload re-runs this file without stopping
+# anything it started, so without this each reload leaves the previous set
+# running and they accumulate one generation per reload.
+"$CONFIG_DIR/bin/supervise" &
+
+sketchybar --update

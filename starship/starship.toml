@@ -1,0 +1,25 @@
+add_newline = false
+format = "$directory$git_branch$git_status$cmd_duration$line_break$character"
+
+# Every style below names an ANSI colour rather than a hex value, so the prompt
+# follows whatever theme Ghostty has loaded. See theme/README.md.
+[directory]
+style = "bold blue"
+# The Koenigsegg ghost stands in for `~`. It is U+100000, a private-use
+# codepoint that Ghostty maps to the Ghost Insignia font (see ghostty/config);
+# the path itself is unchanged, only the marker for home.
+home_symbol = "\U00100000"
+
+[git_branch]
+style = "magenta"
+
+[git_status]
+style = "yellow"
+
+[character]
+success_symbol = "[❯](green)"
+error_symbol = "[❯](red)"
+
+[cmd_duration]
+format = "[$duration]($style) "
+style = "bright-black"

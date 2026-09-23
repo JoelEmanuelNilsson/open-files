@@ -1,0 +1,167 @@
+model = "gpt-5.3-codex"
+review_model = "gpt-5.3-codex"
+
+
+tool_output_token_limit = 25000
+
+# Leave room for native compaction near the 272–273k context window.
+# Formula: 273000 - (tool_output_token_limit + 15000)
+# With tool_output_token_limit=25000 ⇒ 273000 - (25000 + 15000) = 233000
+model_reasoning_effort = "xhigh"
+model_reasoning_summary = "auto"
+personality = "pragmatic"
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+
+[projects."/Users/joel"]
+trust_level = "trusted"
+
+[projects."/Users/joel/open-lovable-parallel"]
+trust_level = "trusted"
+
+[projects."/Users/joel/RotRutBackend"]
+trust_level = "trusted"
+
+[features]
+unified_exec = true
+shell_snapshot = true
+apply_patch_freeform = true
+multi_agent = true
+steer = true
+collaboration_modes = true
+personality = true
+
+[agents]
+max_threads = 12
+
+[agents.architect]
+description = "Advisory architecture partner for tradeoffs, boundaries, and execution sequencing."
+config_file = "/Users/joel/publisher-platform/.codex/agents/architect.toml"
+
+[agents.explorer-agent]
+description = "General read-only context explorer for the main orchestrating thread."
+config_file = "/Users/joel/publisher-platform/.codex/agents/explorer-agent.toml"
+
+[agents.backend]
+description = "Backend/domain implementer for approved plan tasks."
+config_file = "/Users/joel/publisher-platform/.codex/agents/backend.toml"
+
+[agents.frontend]
+description = "Frontend implementer for approved plan tasks."
+config_file = "/Users/joel/publisher-platform/.codex/agents/frontend.toml"
+
+[agents.tester]
+description = "TDD specialist for failing tests, regression coverage, and validation commands."
+config_file = "/Users/joel/publisher-platform/.codex/agents/tester.toml"
+
+[agents.reviewer]
+description = "Severity-based reviewer (P0/P1/P2) with concrete remediation plans."
+config_file = "/Users/joel/publisher-platform/.codex/agents/reviewer.toml"
+
+[agents.security]
+description = "Security reviewer for auth/data/secrets risk before release."
+config_file = "/Users/joel/publisher-platform/.codex/agents/security.toml"
+
+[agents.qa_browser]
+description = "Browser QA specialist using agent-browser + agent-browser-qa artifact contract."
+config_file = "/Users/joel/publisher-platform/.codex/agents/qa_browser.toml"
+
+[agents.browser_operator]
+description = "General browser automation operator for repro, screenshots, and interaction evidence."
+config_file = "/Users/joel/publisher-platform/.codex/agents/browser_operator.toml"
+
+[agents.devops]
+description = "Runtime isolation, CI, and release readiness specialist."
+config_file = "/Users/joel/publisher-platform/.codex/agents/devops.toml"
+
+[agents.documenter]
+description = "Documentation synchronizer for contracts, runbooks, and plan-history alignment."
+config_file = "/Users/joel/publisher-platform/.codex/agents/documenter.toml"
+
+[agents.debugger]
+description = "Failure triage specialist for deterministic root-cause debugging and repro minimization."
+config_file = "/Users/joel/publisher-platform/.codex/agents/debugger.toml"
+
+[agents.performance]
+description = "Performance specialist for latency/throughput regressions across API, web, worker, and build loops."
+config_file = "/Users/joel/publisher-platform/.codex/agents/performance.toml"
+
+[agents.migrator]
+description = "Safe migration specialist for schema/config/runtime migrations with rollback-aware validation."
+config_file = "/Users/joel/publisher-platform/.codex/agents/migrator.toml"
+
+[agents.git_ops]
+description = "Git workflow specialist for branch hygiene, commit/PR sequencing, and conflict-safe operations."
+config_file = "/Users/joel/publisher-platform/.codex/agents/git_ops.toml"
+
+[agents.api_designer]
+description = "API contract specialist for endpoint/interface design, versioning, and compatibility checks."
+config_file = "/Users/joel/publisher-platform/.codex/agents/api_designer.toml"
+
+[agents.refactorer]
+description = "Code health specialist for structure-preserving refactors with regression-proof validation."
+config_file = "/Users/joel/publisher-platform/.codex/agents/refactorer.toml"
+
+[agents.default]
+description = "DISABLED: Built-in default role is intentionally blocked in this environment."
+config_file = "/Users/joel/.codex/agents/default.disabled.toml"
+
+[agents.worker]
+description = "DISABLED: Built-in worker role is intentionally blocked in this environment."
+config_file = "/Users/joel/.codex/agents/worker.disabled.toml"
+
+[agents.explorer]
+description = "DISABLED: Built-in explorer role is intentionally blocked in this environment."
+config_file = "/Users/joel/.codex/agents/explorer.disabled.toml"
+
+[mcp_servers.cloudflare_docs]
+command = "npx"
+args = ["-y", "mcp-remote", "https://docs.mcp.cloudflare.com/mcp"]
+enabled = false
+
+[mcp_servers.openaiDeveloperDocs]
+url = "https://developers.openai.com/mcp"
+enabled = false
+
+[notice]
+"hide_gpt-5.1-codex-max_migration_prompt" = true
+hide_rate_limit_model_nudge = true
+hide_full_access_warning = true
+
+[notice.model_migrations]
+"gpt-5.2" = "gpt-5.2-codex"
+
+[[skills.config]]
+path = "/Users/joel/.codex/skills/builderjson-1to1-compiler/SKILL.md"
+enabled = false
+
+[[skills.config]]
+path = "/Users/joel/.codex/skills/builderjson-high-level/SKILL.md"
+enabled = false
+
+[[skills.config]]
+path = "/Users/joel/.codex/skills/builderjson-replica-workflow/SKILL.md"
+enabled = false
+
+[[skills.config]]
+path = "/Users/joel/.codex/skills/builderjson-ultimate-guide/SKILL.md"
+enabled = false
+
+[[skills.config]]
+path = "/Users/joel/.codex/skills/create-plan/SKILL.md"
+enabled = false
+
+[[skills.config]]
+path = "/Users/joel/.codex/skills/shipping-routine/SKILL.md"
+enabled = false
+
+[[skills.config]]
+path = "/Users/joel/.codex/skills/gh-address-comments/SKILL.md"
+enabled = false
+
+[[skills.config]]
+path = "/Users/joel/.codex/skills/gh-staging-pr/SKILL.md"
+enabled = false
+
+[tui]
+status_line = ["model-with-reasoning", "current-dir", "git-branch", "context-remaining", "codex-version"]

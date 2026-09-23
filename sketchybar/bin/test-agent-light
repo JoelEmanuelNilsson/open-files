@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Drives the agent light by hand and traces what the bar actually did.
+#
+#   ./bin/test-agent-light          one burst, traced at both ends of the bar
+#   ./bin/test-agent-light <item>   one burst, tracing that item
+#   ./bin/test-agent-light on       one burst, untraced
+#
+# ONE CHIP AT A TIME, on purpose. `sketchybar --query` answers about one item
+# per fork and a fork is about 60ms, so a row of sixteen items takes half a second
+# to collect -- which is most of a burst. The first version of this did that
+# and produced a trace that looked like the animation was three times faster
+# than it is. Sampling one item is the finest grain available without writing
+# a second process, and the lag between the two ends is the thing worth seeing.
+#
+# FORCE=1 rides along on the trigger because the light refuses to come on while
+# the terminal is the front app -- which, when you are typing this, it is.
+set -u
+SB=/opt/homebrew/bin/sketchybar
+
+light() { "$SB" --trigger agent_done FORCE=1; }
+
+# A query round-trip is about 26ms here, so 150 samples is about four
+# seconds: one whole burst, plus enough air after it to show it ended.
+trace() {
+  local chip="$1" n=0 c rest=""
+  printf '%s\n' "$chip"
+  light
+  while [ "$n" -lt 150 ]; do
+    c=$("$SB" --query "$chip" |
+      /usr/bin/python3 -c 'import json,sys;print(json.load(sys.stdin)["icon"]["color"][4:])')
+    [ -z "$rest" ] && rest="$c"
+    if [ "$c" = "$rest" ]; then printf '   .'; else printf '\n   %-8s' "$c"; fi
+    n=$((n + 1))
+  done
+  printf '\n'
+  /bin/sleep 0.8
+}
+
+case "${1:-all}" in
+  on)   light; echo "lit"; exit 0 ;;
+  all)  trace space.2; trace power ;;
+  *)    trace "$1" ;;
+esac

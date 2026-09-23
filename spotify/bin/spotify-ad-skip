@@ -1,0 +1,454 @@
+#!/usr/bin/env bash
+#
+# Skip Spotify's ads by doing, automatically, the four things you did by hand:
+# find Spotify, quit it, start it, press play. The window goes back to the room
+# and the tile it was in, and focus goes back to what you were using, so the
+# only thing you notice is that the ad stopped.
+#
+#   spotify-ad-skip            watch, and act (this is what launchd runs)
+#   spotify-ad-skip --once     check right now, act if it is an ad, exit
+#   spotify-ad-skip --status   what does Spotify look like this instant
+#
+# ── How an ad is noticed ────────────────────────────────────────────────────
+#
+# Two rules, and nothing softer.
+#
+#   1. `spotify url of current track` starts with `spotify:ad:`. That prefix is
+#      a real URI scheme in the shipping binary, beside `spotify:track:`.
+#
+#   2. Spotify is PLAYING but has no current track at all.
+#
+# Rule 2 exists because that is what was actually measured here during a real
+# ad: the client answered Apple Events normally, but `current track` was
+# `missing value`. So `spotify url of current track` does not return a marker
+# during an ad -- it raises -1700 and osascript exits non-zero. A detector that
+# asks the obvious way gets an empty string back and does nothing, for ever.
+# That is the bug this file exists in order not to have.
+#
+# Rule 2 is only safe because "no track" never happens otherwise: 190 samples
+# at 20ms across four real track changes, while playing, produced zero. Re-run
+# that check if Spotify changes -- it is the assumption holding this up.
+#
+# Deliberately NOT used: empty artist, `track number` = 0, duration under 40s.
+# Every tool that shipped those false-positives on podcasts, and a tool that
+# restarts Spotify in the middle of a podcast is worse than no tool at all.
+#
+# ── Why a restart rather than muting ────────────────────────────────────────
+#
+# Muting leaves you sitting through 30 seconds of silence. Restarting drops the
+# ad and is back in music in about 1.4 seconds. The cost is that the ad's
+# impression is still reported -- which is also why this is the mildest thing
+# in this space: nothing is patched, blocked, proxied or forged.
+
+set -u
+
+BUNDLE=com.spotify.client
+HOME_WS=3        # the drawer, the room the summon key sends it home to
+SHARE=0.34       # the width the summon key gives it
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SUMMON="$HERE/../../aerospace/bin/aerospace-summon"
+LOG="${SPOTIFY_AD_SKIP_LOG:-$HOME/.cache/spotify-ad-skip.log}"
+SIMULATE=/tmp/spotify-ad-skip.simulate   # touch this to fake an ad
+
+# launchd hands a process almost no PATH, and every tool used here lives
+# somewhere it would not look.
+export PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+mkdir -p "$(dirname "$LOG")"
+
+# ── One watcher, no matter how many times it is started ─────────────────────
+#
+# Two watchers would both notice the same ad and both restart Spotify, and the
+# second restart would land in the middle of the first. `mkdir` is the atomic
+# test-and-set every shell has, so two starting at the same instant cannot both
+# win. A lock left by a crash is detected by asking whether that pid is still
+# alive, rather than by trusting the file to have been cleaned up.
+LOCKDIR="${TMPDIR:-/tmp}/spotify-ad-skip.lock.d"
+claim_lock() {
+  local other
+  if mkdir "$LOCKDIR" 2>/dev/null; then
+    echo $$ >"$LOCKDIR/pid"
+    return 0
+  fi
+  other=$(cat "$LOCKDIR/pid" 2>/dev/null || true)
+  if [ -n "${other:-}" ] && kill -0 "$other" 2>/dev/null; then
+    return 1
+  fi
+  # Stale: the holder is gone. Take it over.
+  echo $$ >"$LOCKDIR/pid"
+  return 0
+}
+release_lock() {
+  # Only ever remove a lock that is still ours.
+  if [ "$(cat "$LOCKDIR/pid" 2>/dev/null || true)" = "$$" ]; then
+    rm -rf "$LOCKDIR" 2>/dev/null
+  fi
+  return 0
+}
+
+# The log is evidence, not an archive. An unbounded one on a laptop is a slow
+# leak, so keep the last couple of thousand lines.
+trim_log() {
+  [ -f "$LOG" ] || return 0
+  local n
+  n=$(wc -l <"$LOG" 2>/dev/null || echo 0)
+  if [ "$n" -gt 4000 ]; then
+    tail -2000 "$LOG" >"$LOG.tmp" 2>/dev/null && mv "$LOG.tmp" "$LOG"
+  fi
+  return 0
+}
+
+say() {
+  printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >>"$LOG"
+  [ "${FOREGROUND:-0}" = 1 ] && printf '%s\n' "$*" >&2
+  return 0
+}
+
+# ── Talking to Spotify without ever starting it ─────────────────────────────
+#
+# Every Apple Event goes to Spotify's pid, never to its name. `tell application
+# "Spotify"` resolves the name through LaunchServices on each event, and when
+# the process is gone it LAUNCHES a new one. Quitting Spotify emits a
+# PlaybackQueueInvalidation, so the watcher probes exactly while Spotify is
+# quitting -- and the probe used to bring it back, every time you closed it.
+# Checking `is running` first does not help: a quitting app still counts as
+# running, and AppleScript relaunched it between two reads of a single probe.
+# Measured, both.
+#
+# A pid names one process. When it is dead the event fails (-600, -609, -2700)
+# and nothing is launched, so there is no race left to lose. The only code
+# that starts Spotify is launch_spotify.
+
+# The pid of the running Spotify, or nothing.
+spotify_pid() {
+  pgrep -x Spotify | head -1
+}
+
+# One JXA expression evaluated against the running Spotify, e.g. 'play()'.
+# Fails, having sent nothing, when Spotify is not running.
+spotify_js() {
+  local pid
+  pid=$(spotify_pid)
+  [ -n "$pid" ] || return 1
+  osascript -l JavaScript -e "Application($pid).$1" 2>/dev/null
+}
+
+# ── One probe that cannot throw ─────────────────────────────────────────────
+#
+# Every property is read inside its own try. One question that raises takes the
+# whole osascript down with it, and then the caller cannot tell "no ad" from
+# "I could not ask" -- which are precisely the two cases that matter.
+#
+# Except when the error says the process is gone. Then the probe ends at once
+# as state=GONE: carrying on would report the state it read before the quit
+# alongside url=ERR from after it, and "playing, url=ERR" reads as an ad -- a
+# restart, in answer to you quitting.
+probe() {
+  local pid
+  pid=$(spotify_pid)
+  if [ -z "$pid" ]; then
+    echo "state=NOT_RUNNING"
+    return 0
+  fi
+  osascript -l JavaScript - "$pid" <<'JXA' 2>&1
+function run(argv) {
+  var spotify = Application(Number(argv[0]))
+  var GONE = [-600, -609, -1712, -2700]
+  function ask(f) {
+    try {
+      return { ok: true, v: f() }
+    } catch (e) {
+      if (GONE.indexOf(e.errorNumber) >= 0) throw GONE
+      return { ok: false }
+    }
+  }
+  try {
+    var o = []
+    var state = ask(() => spotify.playerState())
+    o.push('state=' + (state.ok ? state.v : 'ERR'))
+    var pos = ask(() => spotify.playerPosition())
+    o.push('pos=' + (pos.ok ? pos.v : 'ERR'))
+    var t = ask(() => spotify.currentTrack())
+    if (!t.ok || t.v === null) {
+      o.push('track=MISSING')
+      return o.join(' ')
+    }
+    var url = ask(() => t.v.spotifyUrl())
+    o.push('url=' + (url.ok ? url.v : 'ERR'))
+    var name = ask(() => t.v.name())
+    o.push('name=' + (name.ok ? '[' + name.v + ']' : 'ERR'))
+    var artist = ask(() => t.v.artist())
+    o.push('artist=' + (artist.ok ? '[' + artist.v + ']' : 'ERR'))
+    return o.join(' ')
+  } catch (e) {
+    if (e === GONE) return 'state=GONE'
+    throw e
+  }
+}
+JXA
+}
+
+# ad | no
+#
+# "Connection is invalid" means Spotify is starting or dying, not that an ad is
+# playing -- and it arrives with state=stopped or state=ERR. Requiring
+# state=playing is what stops a restart from triggering another restart.
+classify() {
+  local p="$1"
+  if [ -f "$SIMULATE" ]; then echo ad; return; fi
+  case "$p" in
+    *"url=spotify:ad"*) echo ad; return ;;
+  esac
+  case "$p" in
+    *state=playing*)
+      case "$p" in
+        *track=MISSING*|*url=ERR*) echo ad; return ;;
+      esac
+      ;;
+  esac
+  echo no
+}
+
+spot_win() {
+  aerospace list-windows --all \
+    --format '%{app-bundle-id} %{window-id} %{workspace} %{window-layout}' 2>/dev/null |
+    awk -v id="$BUNDLE" '$1 == id { print $2, $3, $4; exit }'
+}
+
+# ── Launching, which fails about one time in eight ──────────────────────────
+#
+# Measured here: `open` immediately after killing Spotify returns
+#
+#   _LSOpenURLsWithCompletionHandler() failed ... error -600
+#
+# in 1 of 8 attempts. -600 is procNotFound -- LaunchServices still believes the
+# process it just watched die is alive. Nothing is born.
+#
+# The damage lands later, which is what made this hard to see. `tell
+# application "Spotify"` LAUNCHES Spotify when it is not running, so the play
+# step further down would start it behind our backs: outside all the window
+# handling, in whatever room you are standing in, with focus taken and eleven
+# seconds of silence. The symptom looks nothing like the cause.
+#
+# So a launch is not "I ran open". A launch is "a window now exists". Retry
+# until one does; five attempts takes 1-in-8 down to about 1-in-32000.
+#
+# Retrying is safe precisely because the retry condition is "no window exists",
+# which is also aerospace-summon's cold-launch condition -- so summon can do
+# the launching on the path that needs its tiling, without its toggle ever
+# finding a window to put away.
+launch_spotify() {
+  local how="$1" attempt err rc i
+  for attempt in 1 2 3 4 5; do
+    if [ "$how" = summon ]; then
+      "$SUMMON" "$BUNDLE" "$HOME_WS" "$SHARE" >/dev/null 2>&1
+    else
+      err=$(open -g -j -b "$BUNDLE" 2>&1)
+      rc=$?
+      if [ "$rc" -ne 0 ]; then
+        # -600 is reported synchronously and means nothing was started, so
+        # there is no window coming and no reason to wait for one. Go straight
+        # round again; waiting here was 1.5 seconds of silence for nothing.
+        say "  launch: open failed (rc=$rc) $err -- retrying at once"
+        continue
+      fi
+    fi
+    for i in $(seq 75); do
+      if [ -n "$(spot_win)" ]; then
+        [ "$attempt" -gt 1 ] && say "  launch: succeeded on attempt $attempt"
+        return 0
+      fi
+      sleep 0.02
+    done
+    say "  launch: no window after attempt $attempt, retrying"
+  done
+  say "  launch: FAILED after 5 attempts"
+  return 1
+}
+
+# ── Quit it, start it, put it back, press play ──────────────────────────────
+restart_in_place() {
+  local prev_focus here old_wid old_ws old_layout mode new_wid new_ws waited
+  local s p1 p2 i
+
+  prev_focus=$(aerospace list-windows --focused --format '%{window-id}' 2>/dev/null)
+  here=$(aerospace list-workspaces --focused 2>/dev/null)
+  read -r old_wid old_ws old_layout <<<"$(spot_win)"
+  old_ws="${old_ws:-$HOME_WS}"
+
+  # If Spotify was itself the focused window, the id we just captured belongs
+  # to a window we are about to destroy. Focusing a dead id fails -- and inside
+  # an `aerospace eval` a failing command takes the whole request with it, so
+  # the move that shares that request would silently not happen either. Forget
+  # it here, and let the new Spotify window inherit the focus, which is what
+  # you would want anyway: you were looking at Spotify.
+  if [ -n "${old_wid:-}" ] && [ "${prev_focus:-}" = "$old_wid" ]; then
+    prev_focus=""
+    say "  restart: Spotify had focus; the new window will keep it"
+  fi
+
+  # Was it on screen beside you, or parked in the drawer? The two cases want
+  # different treatment, and using the wrong one is visible.
+  if [ "$old_ws" = "$here" ]; then mode=visible; else mode=hidden; fi
+  say "  restart: mode=$mode spotify_ws=$old_ws here=$here prev_focus=${prev_focus:-none}"
+
+  killall Spotify 2>/dev/null
+  waited=0
+  while pgrep -x Spotify >/dev/null; do
+    sleep 0.02
+    waited=$((waited + 1))
+    if [ "$waited" -gt 250 ]; then say "  restart: ABORT, Spotify would not quit"; return 1; fi
+  done
+
+  if [ "$mode" = visible ]; then
+    # summon's cold-launch path tiles, sizes and focuses inside one AeroSpace
+    # request, so the first frame the window is drawn in is already correct.
+    # Then take focus back, because summon ends by focusing Spotify.
+    launch_spotify summon || return 1
+    if [ -n "${prev_focus:-}" ]; then
+      aerospace focus --window-id "$prev_focus" 2>/dev/null
+    fi
+  else
+    # Spotify force-activates its new window whatever open(1) is told, so the
+    # window does appear in the room you are standing in. Notice it at 20ms and
+    # send it home: measured, it is on screen for about 40ms.
+    launch_spotify open || return 1
+    read -r new_wid new_ws _ <<<"$(spot_win)"
+    if [ -n "${new_wid:-}" ]; then
+      aerospace eval \
+        "move-node-to-workspace --window-id $new_wid $old_ws; focus --window-id ${prev_focus:-$new_wid}" \
+        2>/dev/null ||
+        say "  restart: could not move window $new_wid home to $old_ws"
+    fi
+  fi
+
+  # It always comes back paused, so play has to be sent. And the first
+  # `playing` it reports is a lie while the audio engine is still coming up --
+  # trust it only once the position has actually moved.
+  for i in $(seq 120); do
+    if [ -z "$(spotify_pid)" ]; then
+      say "  restart: Spotify vanished while waiting for playback"
+      return 1
+    fi
+    s=$(spotify_js 'playerState()')
+    if [ "$s" = "playing" ]; then
+      p1=$(spotify_js 'playerPosition()')
+      sleep 0.25
+      p2=$(spotify_js 'playerPosition()')
+      if [ -n "${p1:-}" ] && [ -n "${p2:-}" ] &&
+        awk -v a="$p1" -v b="$p2" 'BEGIN { exit !(b > a + 0.05) }'; then
+        say "  restart: playing, position advancing ($p1 -> $p2)"
+        return 0
+      fi
+    fi
+    spotify_js 'play()' >/dev/null
+    sleep 0.05
+  done
+  say "  restart: gave up waiting for playback"
+  return 1
+}
+
+# ── Deciding, with a brake ──────────────────────────────────────────────────
+#
+# An ad break holds more than one ad, so a second restart soon after the first
+# is correct behaviour and not a fault. What must never happen is restarting
+# for ever because something is being misread. So restart freely, but if it
+# happens more than four times inside two minutes, stand down for five and say
+# so in the log.
+BURST_START=0
+BURST_N=0
+STAND_DOWN_UNTIL=0
+
+check() {
+  local why="$1" p verdict nowsec
+  p="$(probe)"
+  verdict="$(classify "$p")"
+  nowsec=$(date +%s)
+
+  if [ "$verdict" != ad ]; then
+    say "$why | ok | $p"
+    return 0
+  fi
+
+  say "$why | AD | $p"
+
+  if [ "$nowsec" -lt "$STAND_DOWN_UNTIL" ]; then
+    say "  standing down for $((STAND_DOWN_UNTIL - nowsec))s more, not restarting"
+    return 0
+  fi
+
+  if [ $((nowsec - BURST_START)) -gt 120 ]; then
+    BURST_START=$nowsec
+    BURST_N=0
+  fi
+  BURST_N=$((BURST_N + 1))
+  if [ "$BURST_N" -gt 4 ]; then
+    STAND_DOWN_UNTIL=$((nowsec + 300))
+    say "  !! five restarts in two minutes -- something is being misread. Standing down 5 min."
+    return 0
+  fi
+
+  restart_in_place
+  trim_log
+  return 0
+}
+
+case "${1:-}" in
+  # A seam for the tests. classify() is the one piece of judgement in here, and
+  # judgement that cannot be tested is just an opinion -- so it takes a probe
+  # line as text and answers, with no Spotify and no window manager involved.
+  --classify)
+    SIMULATE=/nonexistent
+    classify "${2:-}"
+    exit 0
+    ;;
+  --status)
+    probe
+    echo
+    echo "verdict: $(classify "$(probe)")"
+    exit 0
+    ;;
+  --once)
+    FOREGROUND=1 check "manual"
+    exit 0
+    ;;
+esac
+
+if [ -t 2 ]; then FOREGROUND=1; fi
+
+if ! claim_lock; then
+  say "already watching as pid $(cat "$LOCKDIR/pid" 2>/dev/null) -- this copy is exiting"
+  exit 0
+fi
+
+say "=== spotify-ad-skip started (pid $$) ==="
+trim_log
+check "startup"
+
+# macOS logs PlaybackQueueInvalidation on every now-playing change, about 130ms
+# after it happens, and the predicate matches Spotify by NAME -- so the stream
+# survives Spotify being restarted, which a pid-based trigger would not. The
+# heartbeat is the backstop for anything the log misses.
+cleanup() {
+  pkill -P $$ >/dev/null 2>&1
+  release_lock
+  say "=== spotify-ad-skip stopped ==="
+}
+trap cleanup EXIT INT TERM
+
+{
+  (while true; do
+    sleep 5
+    echo HEARTBEAT
+  done) &
+  log stream --style compact \
+    --predicate 'process == "Spotify" AND eventMessage CONTAINS "PlaybackQueueInvalidation"' \
+    2>/dev/null &
+  wait
+} | while IFS= read -r line; do
+  case "$line" in
+    HEARTBEAT) check "beat" ;;
+    *PlaybackQueueInvalidation*) check "change" ;;
+  esac
+done

@@ -1,0 +1,74 @@
+# A theme is this file and nothing else: a colour and a few numbers.
+# cyberpurple -- cyberdream's six neon accents over violet greys.
+#
+# cyberdream.toml with three numbers changed, and nothing else. Its accents,
+# its skin and its wallpaper are all still his; only the greys moved:
+#
+#   background 0a0212   slot 0  1e1227   slot 8  9d8eab
+#   foreground ffffff   slot 7  ffffff   slot 15 ffffff
+#
+# The three are seed, tint and bg, and the third is why the other two do
+# anything: chroma at L 0 is still black, so a pure-black background cannot
+# be purple. Raising bg is what gives the hue somewhere to sit.
+#
+# It cannot rise much further. His accents are solved against pure black and
+# gen.py holds them to 4.5:1 -- at bg 0.24 his red #d9534f falls to 4.16 and
+# build_palette refuses outright. About 0.18 is the ceiling. Past that the
+# accents have to be re-solved (theme/solve_accents.py) and stop being his.
+
+seed = "#bd5eff"      # his magenta. Unlike cyberdream this seed is used: tint
+                      # is non-zero, so every surface and every grey carries it.
+tint = 0.045          # OKLCH chroma of the surface tiers; purple, not grey
+text_tint = 0.022     # OKLCH chroma of the text tiers; a violet cast on white
+accent_chroma = 0.11  # unused: all twelve accent slots are explicit below
+hue_pull = 0          # ditto
+skin = "islands"      # sketchybar/skins/<name>.sh: one glass chip per group.
+                      # Changing it reloads the bar.
+opacity = 0.85        # his is 0.6; well past it — the neon photo reads as a
+                      # tint behind the text, not as a competing image.
+                      # The DEFAULT for both modes, not a theme-wide constant:
+                      # light.toml overrides it with 1.0, because paper behind
+                      # glass is unreadable. This is the number dark mode gets.
+blur = 24
+
+[dark]
+# His own, from PraveenGongada/dotfiles' wallpapers/, shared with cyberdream.
+# A photo rather than the rendered gradient: bg is 0.12 here, and a gradient
+# lifted 0.16 off that is still a near-black screen. Cyan neon on near-black is
+# the palette's own #5ea1ff and #5ef1ff, and the violet ground agrees with it.
+wallpaper = "cyberdream-dark.jpg"
+bg = 0.12             # #0a0212. See the header: this is the whole theme.
+surface = 0.208       # #1e1227 -- his lightness, tinted
+selection = 0.371     # #473a52 -- his lightness, tinted
+dim = 0.669           # #8d96a0
+muted = 1.0           # #ffffff -- slot 7 is white in his palette, the same
+                      # colour as the foreground. The bar does not read it:
+                      # the islands skin fills its chips with bg at the glass opacity.
+fg = 0.90            # not 1.0. Pure white on #0a0212 halates: the glyph bleeds
+                      # into the near-black and the letter shape smears, which
+                      # costs more than the contrast gains. 0.90 is ~#ded4e8,
+                      # still about 13:1. `strong` stays at 1.0 so bold has
+                      # somewhere to go.
+strong = 1.0
+cursor = 1.0
+accent = 0.8          # unused: every accent slot is explicit
+bright_delta = 0.0    # his slots 9-14 are identical to 1-6
+
+# His six ANSI tones, measured out of the theme file as [OKLCH L, C, h].
+# Explicit rather than derived because the whole character of cyberdream is
+# that its accents are near-fluorescent and its surfaces have no colour at all
+# -- a spectrum derived from one seed cannot be both.
+[dark.accents]
+1 = [0.619, 0.169, 25.0]    # red      #d9534f
+2 = [0.885, 0.233, 144.7]   # green    #5eff6c
+3 = [0.961, 0.180, 114.0]   # yellow   #f1ff5e
+4 = [0.707, 0.154, 257.1]   # blue     #5ea1ff
+5 = [0.667, 0.234, 308.5]   # magenta  #bd5eff
+6 = [0.885, 0.125, 204.0]   # cyan     #5ef1ff
+
+# Light mode is theme/light.toml -- cardboard -- and it is shared by every
+# setup here, merged in as this file's [light] table by gen.load_setup_toml. It
+# used to be forty lines copied into each of the three, which is not a shared
+# light mode but three that happened to agree. To give this theme its own, add
+# [light] keys below: each one overrides that file's, and the rest still come
+# from it.

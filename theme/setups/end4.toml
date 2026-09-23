@@ -1,0 +1,60 @@
+# A theme is this file and nothing else: a colour and a few numbers.
+# The periwinkle end4 family -- navy surfaces, periwinkle text.
+
+seed = "#98a5dc"      # the hue every surface and text tier is tinted with
+tint = 0.045          # OKLCH chroma of the surface tiers (bg, slot 0, slot 8, selection); 0 = grey
+text_tint = 0.04      # OKLCH chroma of the text tiers (fg, slot 7, slot 15)
+accent_chroma = 0.11  # OKLCH chroma of the six accent hues (slots 1-6 and 9-14)
+hue_pull = 0.15       # unused: every accent slot this theme ships is explicit,
+                      # in [dark.accents] here and in theme/light.toml
+skin = "flat"         # sketchybar/skins/<name>.sh: the bar's shape. Changing it reloads the bar
+opacity = 0.78        # window background opacity, 1 = solid. The DEFAULT for
+                      # both modes: a mode table's own value wins, and
+                      # light.toml's does (1.0, opaque paper). So in practice
+                      # this is the number dark mode gets.
+blur = 30             # macOS background blur radius, 0 = off. Same rules.
+
+[dark]                # reference: near-black navy panes, periwinkle text
+wallpaper = "end4-dark.jpg"   # theme/wallpapers/, the reference's night sky
+bg = 0.16
+surface = 0.22
+selection = 0.30
+dim = 0.53           # 3.21:1 on slot 0. It was 0.50, which holds 3.23:1 on bg
+                     # and 2.88 on a panel -- the floor is measured on the
+                     # worse of the two now, and this tier is mostly borders
+                     # and gutters, which sit on panels
+accent = 0.80
+
+# The six accents are the reference's own ANSI tones (sampled from end-4's
+# colorscript), not a derived spectrum: [OKLCH L, C, h]. Slots 9-14 are these
+# lifted by bright_delta. "red" is orchid and "green" is pale sky by design.
+# Solved by theme/solve_accents.py from the sampled reference (the reference's
+# own sky/periwinkle pair is the same colour; this is the nearest set where all
+# six are distinct). Re-solve rather than nudge: the floors are measured on the
+# gamut-clipped colours, so a small OKLCH edit does not move the result the way
+# it reads.
+# This reference is pale-on-pale: "green" is a pale sky (h 218) and "cyan" is a
+# periwinkle (h 283), both close to white, and near white every hue converges.
+# This reference is pale-on-pale: "green" is a pale sky (h 218) and "cyan" is a
+# periwinkle (h 283), both close to white, and near white every hue converges.
+# Its six bases land 0.082 apart in OKLab and their brights, lighter still,
+# land 0.070 -- under the 0.08 default no matter what bright_delta is, because
+# the room above them is gone. Declared rather than nudged: the tones below are
+# the reference's own, and 0.070 is what a palette made of pale tints costs.
+[dark.floors]
+accent_distance = 0.07
+
+[dark.accents]
+1 = [0.70, 0.140, 315]   # orchid       (red)      #bf82da
+2 = [0.85, 0.073, 218]   # pale sky     (green)    #97dbef
+3 = [0.78, 0.152, 282]   # lavender     (yellow)   #abaeff
+4 = [0.72, 0.098, 253]   # blue         (blue)     #77a7df
+5 = [0.83, 0.077, 317]   # lilac        (magenta)  #dbb8e8
+6 = [0.90, 0.050, 283]   # periwinkle   (cyan)     #d9dbff
+
+# Light mode is theme/light.toml -- cardboard -- and it is shared by every
+# setup here, merged in as this file's [light] table by gen.load_setup_toml. It
+# used to be forty lines copied into each of the three, which is not a shared
+# light mode but three that happened to agree. To give this theme its own, add
+# [light] keys below: each one overrides that file's, and the rest still come
+# from it.

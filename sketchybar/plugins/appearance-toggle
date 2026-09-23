@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Flip the whole machine between light and dark. Ghostty and herdr follow the
+# system flag on their own; plugins/appearance handles the rest on the event.
+osascript -e 'tell application "System Events" to tell appearance preferences to set dark mode to not dark mode'

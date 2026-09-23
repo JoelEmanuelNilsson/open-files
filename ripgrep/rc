@@ -1,0 +1,4 @@
+# ripgrep's own type list has no `tsx` and no `mjs`, so `rg -t tsx` is an error
+# rather than a search. Both are typed here so the obvious command works.
+--type-add=tsx:*.tsx
+--type-add=mjs:*.mjs

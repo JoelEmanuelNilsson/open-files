@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+#
+# Open a file in nvim, from a click.
+#
+#   pi-open 'pi-open:///Users/joel/dotfiles/pi/kit/extensions/transcript/row.ts?line=42'
+#   pi-open '/Users/joel/notes.md:42'
+#   pi-open file:///etc/hosts
+#
+# The transcript extension puts an OSC-8 link on every path it prints, and a
+# cmd-click hands that URL to macOS, which hands it to the app registered for
+# the scheme. `file://` is a dud on this machine — LaunchServices thinks .ts
+# belongs to QuickTime Player — so the rows link `pi-open:` instead and
+# `~/Applications/Pi Open.app` runs this script with the URL.
+#
+# Where the file lands, in order:
+#
+#   1. the nvim this script opened last time, over its own RPC socket, so ten
+#      clicks do not make ten panes
+#   2. a new split beside whichever herdr pane has focus, which is the pane
+#      that was clicked
+#   3. a fresh Ghostty window, when herdr is not running at all
+#
+# The reused nvim is talked to with `--remote-send`, not by typing into the
+# pane: herdr delivers sent text as a bracketed paste, and a paste into a
+# normal-mode nvim is inserted into the buffer rather than run. That is why the
+# nvim this script starts is started with `--listen`.
+#
+# Nothing here is pi-specific: any terminal, any tool that can print an OSC-8
+# link can use it.
+
+set -uo pipefail
+
+# A click arrives with almost no environment. Naming the PATH is what makes a
+# click and a terminal do the same thing.
+export PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+HERDR=${HERDR_BIN:-herdr}
+NVIM=${NVIM_BIN:-nvim}
+STATE="${XDG_CACHE_HOME:-$HOME/.cache}/pi-open"
+LOG="$STATE/log"
+SOCKET="$STATE/nvim.sock"
+
+mkdir -p "$STATE"
+log() {
+	printf '%s %s\n' "$(date +%H:%M:%S)" "$*" >>"$LOG"
+	# A click has nowhere to print, so the log is the only witness. Keep it short
+	# enough that it never needs rotating on purpose.
+	if [[ $(wc -l <"$LOG") -gt 200 ]]; then tail -n 100 "$LOG" >"$LOG.tmp" && mv "$LOG.tmp" "$LOG"; fi
+}
+
+die() { log "FAIL $*"; exit 1; }
+
+# --- what was clicked -------------------------------------------------------
+
+# Percent-decoding without a language runtime: %xx is \xxx to printf %b. The
+# lone backslash is escaped first so a path containing one survives.
+decode() {
+	local text=${1//\\/\\\\}
+	printf '%b' "${text//%/\\x}"
+}
+
+target=${1:-}
+[[ -n $target ]] || die "no argument"
+
+line=""
+case $target in
+	pi-open:* | file:*)
+		target=${target#pi-open:}
+		target=${target#file:}
+		target=${target#//}
+		# ?line=42 and #L42 both say the same thing; the extension sends the first.
+		case $target in
+			*\?line=*) line=${target##*\?line=}; target=${target%%\?line=*} ;;
+			*\#L*)     line=${target##*\#L};     target=${target%%\#L*} ;;
+		esac
+		target=$(decode "$target")
+		;;
+	*:[0-9]*)
+		# path:42, the spelling grep and every compiler prints. Only a suffix that
+		# is all digits is a line number; `notes:2nd draft.md` is a filename.
+		suffix=${target##*:}
+		if [[ $suffix =~ ^[0-9]+$ ]]; then
+			line=$suffix
+			target=${target%:*}
+		fi
+		;;
+esac
+
+[[ $line =~ ^[0-9]+$ ]] || line=""
+[[ $target == /* ]] || target="$PWD/$target"
+[[ -e $target ]] || die "no such file: $target"
+
+at=${line:+ +$line}
+log "open $target${at}"
+
+# --- 1. the nvim this script opened last time -------------------------------
+
+# Shell quoting, for the command a new pane's shell reads.
+quote() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
+
+# Vim quoting, for a `:drop` typed into a running nvim. Single quotes are not
+# quoting there; a backslash is.
+vimescape() {
+	local text=$1
+	text=${text//\\/\\\\}
+	text=${text// /\\ }
+	text=${text//|/\\|}
+	text=${text//%/\\%}
+	text=${text//\#/\\#}
+	printf '%s' "$text"
+}
+
+# `<C-\><C-N>` first: the window may be sitting in insert mode, or in a
+# terminal buffer. `:drop` rather than `:edit` so an unsaved buffer beside it is
+# not something a click has to argue with.
+if [[ -S $SOCKET ]] && "$NVIM" --server "$SOCKET" --remote-expr 1 >/dev/null 2>&1; then
+	if "$NVIM" --server "$SOCKET" --remote-send "<C-\\><C-N>:drop${at} $(vimescape "$target")<CR>" >/dev/null 2>&1; then
+		[[ -f $STATE/tab ]] && "$HERDR" tab focus "$(<"$STATE/tab")" >/dev/null 2>&1
+		log "reused the nvim on $SOCKET"
+		exit 0
+	fi
+fi
+rm -f "$SOCKET"
+
+# --- 2. a split beside the pane that was clicked ----------------------------
+
+# With no herdr environment of its own — and a click has none — `pane current`
+# answers with the focused pane, which is the one the click came from.
+focused=$("$HERDR" pane current 2>/dev/null | grep -o '"pane_id":"[^"]*"' | head -1 | cut -d'"' -f4)
+
+if [[ -n $focused ]]; then
+	pane=$("$HERDR" pane split --pane "$focused" --direction right --ratio 0.5 --focus 2>/dev/null |
+		grep -o '"pane_id":"[^"]*"' | head -1 | cut -d'"' -f4)
+	if [[ -n $pane ]]; then
+		"$HERDR" pane run "$pane" "nvim --listen $(quote "$SOCKET")${at} $(quote "$target")" >/dev/null 2>&1 && {
+			"$HERDR" pane get "$pane" 2>/dev/null | grep -o '"tab_id":"[^"]*"' | head -1 | cut -d'"' -f4 >"$STATE/tab"
+			log "split $pane beside $focused"
+			exit 0
+		}
+	fi
+fi
+
+# --- 3. a window of its own -------------------------------------------------
+
+rm -f "$STATE/tab"
+# `-c 2` rather than `+2`: Ghostty reads a leading `+` as one of its own actions
+# and drops the argument before nvim ever sees it.
+# `open -na` hands the new instance this process's whole environment. Inside a
+# herdr pane that includes HERDR_ENV and HERDR_PANE_ID, so the fresh Ghostty --
+# and every shell it ever opens -- would claim to be a pane that does not exist,
+# and herdr would refuse to start into it. We only reach branch 3 because herdr
+# is absent, so that identity is false by definition. Strip it.
+if env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
+       -u HERDR_SOCKET_PATH -u HERDR_BIN_PATH \
+       open -na Ghostty --args -e nvim --listen "$SOCKET" ${line:+-c "$line"} "$target" 2>/dev/null; then
+	log "new Ghostty window"
+	exit 0
+fi
+
+die "nothing could open $target"

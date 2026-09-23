@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+#
+# Shared by the aerospace-* scripts. Source it; do not run it.
+#
+# The one thing it knows: which room each app calls home. That table is not
+# written here — it is read out of the `[[on-window-detected]]` rules in
+# aerospace.toml, so the birth rules, the heal, and `x` can never disagree.
+
+AEROSPACE_CONFIG="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/aerospace.toml"
+DRAWER_WORKSPACE=3
+
+# Apps allowed to stay floating. Everything else that turns up floating is a
+# fault and the heal tiles it back — see the comment there for why floating is
+# never a state you want in this setup.
+#
+# System Settings has no fullscreen button, so AeroSpace's dialog heuristic
+# floats it on its own; forcing it into the tree would be undoing a decision
+# the config relies on (see aerospace.toml, "Not listed, on purpose").
+FLOAT_OK='com.apple.systempreferences'
+
+# Prints "bundle-id workspace" per pinned app, one per line.
+pinned_homes() {
+	awk '
+		/^\[\[on-window-detected\]\]/ { app = "" }
+		/^if\.app-id/ { gsub(/.*= *'\''|'\''.*/, ""); app = $0 }
+		/^run *= *'\''move-node-to-workspace / && app { sub(/.*move-node-to-workspace /, ""); sub(/'\''.*/, ""); print app, $0 }
+	' "$AEROSPACE_CONFIG"
+}
+
+# home_of <bundle-id>  →  its room; the drawer if it has none.
+home_of() {
+	local home
+	home=$(pinned_homes | awk -v id="$1" '$1 == id { print $2; exit }')
+	printf '%s' "${home:-$DRAWER_WORKSPACE}"
+}

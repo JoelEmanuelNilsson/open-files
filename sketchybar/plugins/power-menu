@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# The power popup, under the apple. With an argument, an entry was clicked:
+# close the popup and do it. Without one, the pointer left the bar: close the
+# popup.
+#
+# No sudo anywhere. `pmset sleepnow` is allowed as a normal user, and Restart,
+# Shut Down and Log Out go through System Events -- the same path as the Apple
+# menu, so open apps are asked to quit and can still stop it to save work.
+# System Events is already trusted here: plugins/appearance-toggle uses it.
+#
+# Sleep does nothing while `pmset -a disablesleep 1` is set, because that is
+# exactly what the flag is for.
+#
+# `bar` turns off this bar; plugins/bar-power explains how, and how it comes
+# back.
+
+SB=/opt/homebrew/bin/sketchybar
+"$SB" --set apple popup.drawing=off
+
+case "$1" in
+  sleep)    /usr/bin/pmset sleepnow >/dev/null ;;
+  restart)  /usr/bin/osascript -e 'tell application "System Events" to restart' ;;
+  shutdown) /usr/bin/osascript -e 'tell application "System Events" to shut down' ;;
+  logout)   /usr/bin/osascript -e 'tell application "System Events" to log out' ;;
+  bar)      "$CONFIG_DIR/plugins/bar-power" off ;;
+esac

@@ -1,0 +1,55 @@
+onboarding = false
+
+[ui]
+show_agent_labels_on_pane_borders = true
+# No frame around the whole pane area. The border line is drawn high in a cell
+# that Ghostty makes 15% taller than the font asks for, so a bottom border
+# leaves most of a row hanging empty under it -- 32px of a 47px row. Dropping
+# the outer ring reclaims that at the bottom, a row at the top, and a column on
+# each side. It costs the labels on the top row's panes, whose top border is
+# this ring.
+pane_outer_borders = false
+# Each pane draws its own border rather than sharing a divider with its
+# neighbour, so two panes are separated by two border columns instead of one.
+# Sharing (false) reads as no separation at all: the two lines merge.
+pane_gaps = false
+tab_bar_position = "bottom"
+# One tab per Space: the tab row then costs zero rows and the vertical
+# sidebar is the only navigator.
+hide_tab_bar_when_single_tab = true
+
+agent_panel_sort = "spaces"
+[experimental]
+# pi (and any TUI using the Kitty graphics protocol) draws inline images with
+# APC _G sequences. Herdr parses those itself, so without this it stores the
+# image and never paints it: the rows stay reserved and the picture is a hole.
+kitty_graphics = true
+
+[ui.toast]
+delivery = "herdr"
+
+[keys]
+# ¡ is remapped to F12 at the HID layer (macos/com.joel.keymap.plist), so
+# this prefix is a key that types nothing. F12 rather than F13, and the
+# caveat that comes with a prefix on a real key, are both in that file.
+prefix = "f12"
+
+[theme]
+name = "terminal"   # UI colours come from the terminal's ANSI palette (see theme/README.md)
+
+[theme.custom]
+# herdr's terminal theme uses ANSI 8 (darkgray) as a background; our slot 8 is dim text.
+# Slot 0 (black) is the surface tier, so point every surface at it.
+active_row_bg = "black"
+selection_bg = "black"
+surface1 = "black"
+surface_dim = "black"
+# Pane borders: the focused pane's is accent, every other pane's is overlay0.
+# Both keys are shared: accent also marks selection/highlights across herdr's
+# UI, overlay0 also colours secondary sidebar text. The client paints borders,
+# so after an edit reload with prefix+shift+r; `herdr server reload-config`
+# alone won't show it.
+# herdr's "white" is ANSI 15 (strong text). The terminal theme's defaults
+# are blue and gray (ANSI 7).
+accent = "green"
+overlay0 = "white"

@@ -1,0 +1,282 @@
+#!/usr/bin/env bash
+# The agent light: what the whole bar does when an agent has stopped and wants
+# you back.
+#
+# Every glyph and number on the bar lights at once and then the colour slides
+# along it, left to right, for three seconds straight, once. The bar is the
+# signal. There is no dot.
+#
+# ── WHY THIS IS ON THE BAR AND NOT A NOTIFICATION ──────────────────────────
+#
+# pi sends OSC 777 when a turn settles. Inside herdr that escape never reaches
+# Ghostty -- herdr parses the stream itself and draws the toast in its own
+# window -- so the one place the message cannot be seen is the one place you
+# are when you need it, which is another AeroSpace workspace. herdr's own
+# `notification show` has the same shape: its --position is top-left..
+# bottom-right *of herdr*.
+#
+# The transport is not really the problem though. A banner is a small thing in
+# one corner of one window. The bar is on every AeroSpace workspace, and three
+# seconds of colour moving across its whole width is what peripheral vision
+# reports.
+#
+# ── WHY THE WHOLE BAR, FOR THREE SECONDS ─────────────────────────────────────────
+#
+# The first version of this announced itself with a wave that crossed the bar
+# once, in a second, and then left one 20-point chip drifting. It read as
+# nothing. Two reasons, and both are about how peripheral vision works: a
+# single small object changing hue is not something the edge of the eye
+# reports, and a thing that happens once is a thing you had to already be
+# looking at. Motion across the whole width, still going when you turn your
+# head, is neither.
+#
+# So the burst is long: three seconds of motion and then a still bar, which is
+# what keeps it from becoming wallpaper -- a bar that moves all the time is a
+# bar you stop seeing. It used to repeat every six seconds until you focused
+# the terminal; that was a nag, so it fires once per agent_done and stops.
+#
+# ── WHY THE GLYPHS AND NOT THE CHIPS ────────────────────────────────────────
+#
+# The bar is the terminal's glass now (skins/glass.sh), and a burst that
+# repaints the glass turns the bar into nine saturated slabs -- loud, and
+# nothing like the material it is made of. Painting the ink keeps the chips
+# still and makes the text itself carry the colour.
+#
+# The cost is area: a glyph is a few dozen points of ink where a chip is about
+# 24x60 of fill, and the eye's periphery integrates area. What pays for it is
+# the ground: the arc is saturated mid-tones and the chip is near-black glass,
+# so every letter on the bar goes from off-white to full colour at once. It is
+# also skin-independent -- text sits on whatever the skin put under it.
+#
+# Each item is its own slot on the rail, not each chip, so the colour moves
+# glyph by glyph rather than jumping a chip at a time.
+#
+# ── WHAT IS DELIBERATELY NOT PAINTED ────────────────────────────────────────
+#
+# The lit room's glyph and the boost chevrons: they draw in icon.highlight_color
+# on their cell, which lib/rooms.sh and the skin own. The unlit rooms are
+# painted -- their icon.color is nobody else's.
+#
+# The sparklines: graph.color does not animate, it snaps. Measured. The cpu and
+# memory glyphs and numbers beside them are painted.
+#
+# The bar's own background, because --bar takes no --animate.
+#
+# ── THE MECHANICS, MEASURED ─────────────────────────────────────────────────
+#
+# sketchybar animates at 60fps: --animate linear 120 takes exactly 2.00s.
+#
+# Chained --animate clauses in ONE invocation play in SEQUENCE. That is the
+# whole reason this is affordable: a full lap of the arc, for every item on the
+# bar, is one call every twenty-four seconds. 1440 argv entries went through in
+# one call here without complaint.
+#
+# A delay is a no-op clause. There is no "wait" primitive, so an item that must
+# not light yet is animated to the colour it is already wearing for as long as
+# it has to wait. That is what makes the wash-in travel with no per-item timer.
+#
+# EVERY CHAIN ENDS AT REST. So a burst cleans up after itself: nothing to
+# unwind, nothing carried into the next one, and a burst arriving mid-flight
+# cancels the one in the air -- a new --animate replaces a queued chain and
+# starts from the colour on screen -- and still lands at rest.
+#
+# A plain --set of the same property KILLS a running animation.
+# plugins/appearance repaints every icon.color and label.color on each flip, so
+# a flip mid-burst ends it -- at the new text colour, which is rest anyway.
+#
+# A --set of an item's TEXT does not kill an animation on its colour. Measured:
+# bin/pump rewrites the clock, the percentages and half a dozen glyphs every
+# second while this runs, and the colours keep moving. Different property,
+# different animation slot.
+#
+# ── WHAT IT COSTS ───────────────────────────────────────────────────────────
+#
+# Nothing at rest. The `agent` item stays updates=off, so an app switch costs
+# this file nothing; only `agent.wake` hears agent_done. One fork per burst and
+# sixteen items repainting at 60fps for three seconds. This is the only thing on
+# the bar that asks for a frame rate, the same way the wave is the only thing
+# in pi's chrome that does. PI_ZEN_WAVE=off is that one's switch; BAR_LIGHT=off
+# is this one's.
+
+CONFIG_DIR="${CONFIG_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+source "$CONFIG_DIR/lib/geometry.sh"
+source "$CONFIG_DIR/lib/skin.sh"
+source "$CONFIG_DIR/lib/arc.sh"
+
+SKETCHYBAR=/opt/homebrew/bin/sketchybar
+
+# The terminal the agents live in. If it is already in front you saw the turn
+# end, and there is nothing to carry to you.
+TERMINAL_APP="Ghostty"
+
+[ "${BAR_LIGHT:-on}" = "off" ] && exit 0
+
+# ── The arc this surface paints in ──────────────────────────────────────────
+# lib/arc.sh carries both, because macOS flips appearance under a running bar
+# and a table that only knew about tonight would be wrong at breakfast.
+if [ "$CHROME_MODE" = light ]; then ARC=("${ARC_LIGHT[@]}"); else ARC=("${ARC_DARK[@]}"); fi
+
+# The colour text wears when nobody wants anything. Whatever the skin says
+# text is; never a remembered value, so a lap that ends during an appearance
+# flip cannot leave half the bar in last night's ink.
+REST="$CHROME_TEXT"
+
+# ── Timings, in frames at 60fps ─────────────────────────────────────────────
+#
+# A burst is three seconds of continuous motion and then nothing. Every item is
+# lit for the whole three seconds; what moves is the colour, which slides along
+# the bar because each item is a little behind the one to its left.
+#
+# No gaps and no bands. The first version of this fired three discrete flashes
+# with dark between them, which is three events, and three events is three
+# chances to be looking the wrong way. One continuous movement is one thing
+# happening, and it is still happening when you turn your head.
+HOP=12          # one step along the fold, a fifth of a second
+HOPS=13         # so the moving part is 156 frames
+RISE=8          # up from rest, all items together
+FALL=16         # and back down. 180 frames, 3.00s
+# Fold positions per hop: how fast the colour travels. It must be ODD. An item
+# stalls for a whole hop whenever two consecutive positions land on a mirror
+# pair -- x and 22-x are the same colour -- and 2*phase + (2k+1)*ADVANCE is
+# congruent to 0 mod 22 only when ADVANCE is even. Measured first as a 0.17s
+# hold at the top of the arc, then derived. Three crosses the bar about three
+# times in a burst.
+ADVANCE=3
+
+
+# ── The fold ────────────────────────────────────────────────────────────────
+# The arc runs blue to green and does not wrap: stepping off its end and back
+# to the start is a hue jump, and a jump in the middle of a slide is the one
+# thing that makes it read as a glitch. So the colour walks out along the arc
+# and back again -- position and its mirror give the same colour -- and there
+# is no discontinuity anywhere in it.
+FOLD=$(( (ARC_POINTS - 1) * 2 ))
+
+# Everything this run will say to the bar, in one call. Built by the branches
+# below and sent once at the bottom: a lap is six hundred clauses, and six
+# hundred invocations is not the same program.
+args=()
+
+# ── The rail ────────────────────────────────────────────────────────────────
+#
+# Every item with text on the bar, in the order they appear on screen -- which
+# is NOT the order they are declared: items/right.sh adds right-to-left,
+# because the first item added to the right side is the one furthest right.
+# Written out rather than queried, because sketchybar will tell you an item's
+# x position but only one item per fork, and this has to be one call. Hidden
+# items (media with nothing playing) take their slot and paint invisibly.
+#
+# `.notch` is the 185 points of camera in the middle. It is not an item and
+# takes no colour; it is here because a wave that ignores it arrives on the
+# right-hand side early by exactly its width.
+RAIL='
+apple
+space.1
+space.2
+space.3
+media
+cpu
+mem
+.notch
+shazam
+appearance
+volume
+audio
+wifi
+kbd
+battery
+clock
+'
+
+# ── One burst ───────────────────────────────────────────────────────────────
+#
+# Two passes over the rail and no forks in either: an item's place in the wave
+# depends on how many items there are, and that is not known until the first
+# pass is done.
+#
+# Every chain is exactly RISE + HOPS*HOP + FALL frames, because every item
+# starts and ends at the same moment -- they differ in colour, not in timing.
+# That is what makes it one movement rather than sixteen.
+#
+# icon.color and label.color in one clause, so both halves of an item move as
+# one.
+burst() {
+  local line items=0 notch=0 slots=0 slot=0 k phase i
+
+  while read -r line; do
+    case "$line" in ''|.notch) continue ;; esac
+    items=$((items + 1))
+  done <<EOF
+$RAIL
+EOF
+  [ "$items" -gt 0 ] || return 0
+
+  # The notch, in items. It takes no colour, but the slide would arrive on the
+  # right-hand side early by exactly its width if it were not counted.
+  notch=$(( (items * NOTCH_WIDTH + SCREEN_WIDTH / 2) / SCREEN_WIDTH ))
+  slots=$((items + notch))
+
+  while read -r line; do
+    case "$line" in '') continue ;; .notch) slot=$((slot + notch)); continue ;; esac
+
+    # Half a fold spread across the bar, so the whole arc is on screen at once
+    # and neighbours wear neighbouring colours. Subtracted rather than
+    # added: an item is BEHIND the one to its left, which is what makes the
+    # colour travel left to right rather than right to left.
+    phase=$(( FOLD - (slot * (FOLD / 2) / slots) ))
+
+    i=$((phase % FOLD)); [ "$i" -lt "$ARC_POINTS" ] || i=$((FOLD - i))
+    args+=(--animate linear "$RISE" --set "$line" "icon.color=${ARC[$i]}" "label.color=${ARC[$i]}")
+
+    k=1
+    while [ "$k" -le "$HOPS" ]; do
+      i=$(( (phase + k * ADVANCE) % FOLD )); [ "$i" -lt "$ARC_POINTS" ] || i=$((FOLD - i))
+      args+=(--animate linear "$HOP" --set "$line" "icon.color=${ARC[$i]}" "label.color=${ARC[$i]}")
+      k=$((k + 1))
+    done
+
+    args+=(--animate linear "$FALL" --set "$line" "icon.color=$REST" "label.color=$REST")
+    slot=$((slot + 1))
+  done <<EOF
+$RAIL
+EOF
+}
+
+# ── What happened ───────────────────────────────────────────────────────────
+case "${SENDER:-}" in
+  # An agent stopped and wants you back. A second agent finishing mid-burst
+  # re-washes from the left, which is correct -- something new happened and the
+  # bar should say so. Every chain ends at rest, so nothing needs putting out.
+  agent_done)
+    # Unless you were already looking at it. The light means "an agent finished
+    # while you were somewhere else"; if the terminal is already the front app
+    # then you are in the room where it happened and there is nothing to carry
+    # to you.
+    #
+    # lsappinfo rather than osascript: two forks of about six milliseconds each
+    # against one of two hundred, and it needs no accessibility permission. The
+    # closing quote is in the pattern so "Ghostty Helper" is not Ghostty.
+    #
+    # FORCE=1 skips it, which is how you test the light from the terminal it is
+    # telling you to go back to: `sketchybar --trigger agent_done FORCE=1`.
+    # A trigger's key=value pairs arrive as environment variables, so the test
+    # path is the real path with one variable set, not a second code path.
+    if [ "${FORCE:-}" != 1 ]; then
+      case "$(/usr/bin/lsappinfo info -only name "$(/usr/bin/lsappinfo front)" 2>/dev/null)" in
+        *"=\"$TERMINAL_APP\""*) exit 0 ;;
+      esac
+    fi
+    burst
+    ;;
+
+  # Anything else -- the bar loading, an appearance repaint that killed a
+  # burst in flight, an app switch -- has nothing to restore: the text is
+  # already at rest, or about to be.
+  *) ;;
+esac
+
+# stdout only. sketchybar reports a name that matched nothing on stdout and
+# still exits 0, so that has to go; anything on stderr is this file being wrong
+# and must be allowed to reach a log.
+[ ${#args[@]} -gt 0 ] && "$SKETCHYBAR" "${args[@]}" >/dev/null
+exit 0

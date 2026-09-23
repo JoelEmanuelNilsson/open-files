@@ -1,0 +1,452 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Why does my pi transcript look uglier than Claude Code's?</title>
+<link rel="stylesheet" href="theme.css">
+<style>
+/* owner colours: one colour, one meaning, whole page */
+:root{--own-pi:var(--pine); --own-sub:var(--love); --own-kit:var(--foam)}
+.g.pi{background:var(--own-pi)} .g.sub{background:var(--own-sub)} .g.kit{background:var(--own-kit)} .g.prose{background:var(--text)}
+
+/* the signature: one turn, drawn as pi draws it, shrinking under the plan slider */
+.turn{background:var(--surface); border:1px solid var(--overlay); border-radius:12px; overflow:hidden; margin:20px 0 0}
+.turn .bar{display:flex; align-items:center; gap:14px; padding:12px 18px; border-bottom:1px solid var(--overlay); background:var(--hlow)}
+.turn .bar .nm{font-family:var(--mono); font-size:12.5px; color:var(--subtle); letter-spacing:.04em}
+.tty{font-family:var(--mono); font-size:13px; line-height:1.45; padding:14px 0 12px; color:var(--text); overflow-x:auto; min-height:120px}
+.ln{display:flex; white-space:pre; padding:0 18px 0 0; border-left:3px solid transparent; padding-left:15px; transition:opacity var(--t-panel) var(--ease-out),transform var(--t-panel) var(--ease-out),background-color var(--t-hover) ease}
+.ln.pi{border-left-color:var(--own-pi)} .ln.sub{border-left-color:var(--own-sub)} .ln.kit{border-left-color:var(--own-kit)}
+.ln.blank{color:transparent}
+.ln.blank::before{content:"·"; color:var(--hmed)}
+.ln.click{cursor:pointer}
+@media (hover:hover) and (pointer:fine){.ln.click:hover{background:color-mix(in srgb,var(--iris) 10%,transparent)}}
+.ln.next{background:color-mix(in srgb,var(--love) 12%,transparent)}
+.ln.new{background:color-mix(in srgb,var(--foam) 10%,transparent)}
+.ln.out{opacity:0; transform:translateX(-8px); height:0; padding-top:0; padding-bottom:0; overflow:hidden}
+.dim{color:var(--subtle)} .bold{font-weight:700} .ital{font-style:italic}
+.chrome{color:var(--gold)} .ok{color:var(--foam)} .err{color:var(--love)}
+/* the plan slider, drawn like pi's own footer line */
+.slider{display:grid; grid-template-columns:1fr; gap:6px; padding:16px 18px 14px; background:var(--hlow); border-top:1px solid var(--overlay)}
+.slider input[type=range]{width:100%; accent-color:var(--iris); cursor:pointer}
+.ticks{display:grid; grid-template-columns:repeat(6,1fr); font-family:var(--mono); font-size:11.5px; color:var(--subtle); letter-spacing:.02em}
+.ticks span{cursor:pointer; padding:2px 0} .ticks span.on{color:var(--iris)}
+.ticks span:first-child{text-align:left} .ticks span:not(:first-child){text-align:center} .ticks span:last-child{text-align:right}
+.count{display:flex; align-items:baseline; gap:12px; font-family:var(--mono); font-size:13px; color:var(--subtle); padding:0 18px 12px; background:var(--hlow)}
+.count b{font-size:22px; color:var(--text); font-family:var(--display); letter-spacing:-0.02em}
+.count .ctx{flex:1; height:8px; background:var(--overlay); border-radius:4px; overflow:hidden}
+.count .ctx i{display:block; height:100%; background:var(--iris); transition:width var(--t-panel) var(--ease-out)}
+.stepnote{font-size:15px; color:var(--subtle); padding:0 18px 14px; background:var(--hlow); max-width:none}
+.stepnote b{color:var(--text); font-weight:600}
+
+/* story frames (SVG) */
+.frames{display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin:18px 0 8px}
+.frame{background:var(--surface); border:1px solid var(--overlay); border-radius:10px; padding:14px 14px 12px}
+.frame svg{width:100%; height:auto; display:block}
+.frame p{font-size:15px; color:var(--subtle); margin:10px 0 0; max-width:none}
+.frame p b{color:var(--text); font-weight:600}
+svg text{font-family:var(--mono); font-size:11px; fill:var(--text)}
+svg .lbl{fill:var(--subtle); font-size:10px}
+svg .box{fill:var(--hlow); stroke:var(--overlay)}
+svg .file{fill:var(--surface); stroke:var(--hhigh)}
+svg .full{fill:color-mix(in srgb,var(--foam) 25%,var(--hlow)); stroke:var(--foam)}
+svg .empty{fill:color-mix(in srgb,var(--love) 18%,var(--hlow)); stroke:var(--love)}
+svg .arrow{stroke:var(--subtle); fill:none; stroke-width:1.4; marker-end:url(#ah)}
+svg .kitc{fill:var(--foam)} svg .subc{fill:var(--love)} svg .pic{fill:var(--pine)}
+
+/* load order flow */
+.order{display:grid; grid-template-columns:auto 1fr; gap:10px 16px; align-items:center; margin:16px 0}
+.order .k{font-family:var(--mono); font-size:12px; color:var(--subtle); letter-spacing:.06em}
+.chain{display:flex; align-items:center; gap:8px; flex-wrap:wrap}
+.pkg{font-family:var(--mono); font-size:12.5px; padding:6px 10px; border-radius:6px; border:1px solid var(--overlay); background:var(--surface); color:var(--subtle)}
+.pkg.sub{border-color:var(--own-sub); color:var(--text)} .pkg.kit{border-color:var(--own-kit); color:var(--text)}
+.pkg.win{box-shadow:0 0 0 2px color-mix(in srgb,var(--gold) 60%,transparent)}
+.chain .ar{color:var(--muted)}
+
+/* plan ladder */
+.ladder{list-style:none; padding:0; margin:16px 0 0; max-width:none; display:grid; gap:8px}
+.ladder li{display:grid; grid-template-columns:34px 1fr auto; gap:14px; align-items:baseline; padding:10px 14px; background:var(--surface); border:1px solid var(--overlay); border-radius:8px; margin:0}
+.ladder .n{font-family:var(--mono); font-size:12px; color:var(--iris)}
+.ladder .cost{font-family:var(--mono); font-size:11.5px; color:var(--subtle); letter-spacing:.04em}
+.ladder li.on{border-color:var(--iris)}
+.ladder small{display:block; color:var(--subtle); font-size:14.5px}
+
+/* breaks */
+table{border-collapse:collapse; width:100%; font-size:15px; margin:12px 0 0}
+th{font-family:var(--mono); font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); text-align:left; padding:6px 10px 8px; border-bottom:1px solid var(--overlay); font-weight:400}
+td{padding:9px 10px; border-bottom:1px solid var(--overlay); vertical-align:top; color:var(--text)}
+td:first-child{color:var(--text); font-weight:600}
+.answer .row{display:flex; gap:18px; flex-wrap:wrap; margin:0 0 8px}
+.answer .row label{margin:0; display:flex; gap:8px; align-items:center; cursor:pointer}
+kbd{font-family:var(--mono); font-size:12.5px; padding:1px 6px; border-radius:4px; background:var(--hlow); border:1px solid var(--overlay); color:var(--text)}
+.two{display:grid; grid-template-columns:1fr 1fr; gap:16px}
+@media (max-width:1300px){.two{grid-template-columns:1fr}}
+.gaps ul{margin:0} .gaps li{font-size:15px}
+</style>
+</head>
+<body>
+
+<header class="strip" aria-label="you are here">
+  <ol>
+    <li><a class="station on" href="#turn"><span class="nm">The turn</span><span class="wd">now → target</span></a></li>
+    <li class="mark"><span class="arrow">→</span></li>
+    <li><a class="station" href="#why"><span class="nm">Why</span><span class="wd">three causes</span></a></li>
+    <li class="mark"><span class="arrow">→</span></li>
+    <li><a class="station" href="#plan"><span class="nm">Plan</span><span class="wd">six steps</span></a></li>
+    <li class="mark"><span class="arrow">→</span></li>
+    <li><a class="station" href="#decide"><span class="nm">Decide</span><span class="wd">five picks</span></a></li>
+    <li class="mark"><button class="theme-toggle" id="themeToggle" aria-label="switch light and dark"><svg class="moon" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg><svg class="sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></button></li>
+  </ol>
+</header>
+
+<div class="page">
+<main class="content">
+
+<section id="turn">
+  <h1>Why does my pi transcript look uglier than Claude Code's, and what makes it stop?</h1>
+  <p class="lead" style="margin-top:18px">Our own rows already have Claude Code's shape. Every ugly line is one of three things: a row that never got our <span class="term" data-x="receipt">receipt</span>, a bug that stops bash from folding, or a stub pi will not let us silence.</p>
+
+  <div class="gaps">
+    <h2>gaps</h2>
+    <ul>
+      <li>pi has no way for one extension to reach another's tool. Owning a vendor row means registering the tool first and forwarding. <span class="tag absent">absent</span></li>
+      <li>pi has no zero-line mode for hidden thinking. A patch and an upstream PR are the only routes. <span class="tag absent">absent</span></li>
+      <li>Claude Code has no inline agent list to fold. The <span class="term" data-x="footer pill">footer pill</span> and a modal are all it has. <span class="tag absent">absent</span></li>
+    </ul>
+  </div>
+
+  <h2>One real turn, this session, 18:45 to 18:47 <span class="tag derived">derived · two screenshots</span></h2>
+  <p>Left edge: <span class="g pi"></span>pi itself, <span class="g sub"></span>pi-subagents, <span class="g kit"></span>our kit, none for the model's words. A dot is a blank line. Drag the plan forward. Click any line.</p>
+
+  <figure class="turn" aria-label="the turn as pi draws it, shrinking as the plan steps are applied">
+    <div class="bar"><span class="nm">~/dotfiles · fullscreen · 178 columns</span></div>
+    <div class="tty" id="termA" aria-label="agent turn"></div>
+    <div class="slider">
+      <input type="range" id="step" min="0" max="5" value="0" step="1" aria-label="plan step">
+      <div class="ticks" id="ticks"></div>
+    </div>
+    <div class="count"><span>lines on screen</span><b id="countA">0</b><span class="ctx"><i id="ctxA"></i></span><span id="deltaA"></span></div>
+    <p class="stepnote" id="stepnote"></p>
+  </figure>
+
+  <h3 style="margin-top:36px">The same slider on a bash turn <span class="tag derived">derived · previous session, 18:09</span></h3>
+  <figure class="turn" aria-label="a bash turn as pi draws it, folding as steps are applied">
+    <div class="tty" id="termB" aria-label="bash turn"></div>
+    <div class="count"><span>lines on screen</span><b id="countB">0</b><span class="ctx"><i id="ctxB"></i></span><span id="deltaB"></span></div>
+  </figure>
+</section>
+
+<section id="why">
+  <h2>Why bash never folds: it asks the wrong copy</h2>
+  <p>pi loads every extension file in its own module cache. <code>bash.ts</code> borrows the receipt from the transcript folder, and gets a second copy of the <span class="term" data-x="planner">planner</span> with it. That copy is empty. <span class="tag derived">derived · loader.js:417, group.ts:211, live repro</span></p>
+  <div class="frames" aria-label="three frames: two files load, two planners exist, bash asks the empty one">
+    <div class="frame" aria-label="frame one: pi loads two files separately">
+      <svg viewBox="0 0 300 150">
+        <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#908caa"/></marker></defs>
+        <rect class="box" x="10" y="10" width="280" height="130" rx="8"/>
+        <text x="20" y="30" class="lbl">pi loader · one cache per file</text>
+        <rect class="file" x="18" y="46" width="128" height="34" rx="5"/><text x="26" y="67">transcript/index.ts</text>
+        <rect class="file" x="166" y="46" width="110" height="34" rx="5"/><text x="188" y="67">bash.ts</text>
+        <path class="arrow" d="M79 82 L79 118"/><path class="arrow" d="M221 82 L221 118"/>
+        <text x="40" y="132" class="lbl">group.ts · copy 1</text><text x="182" y="132" class="lbl">group.ts · copy 2</text>
+      </svg>
+      <p><b>Two files, two loads.</b> Same source, different memory.</p>
+    </div>
+    <div class="frame" aria-label="frame two: the transcript fills its planner, bash's stays empty">
+      <svg viewBox="0 0 300 150">
+        <rect class="full" x="24" y="30" width="110" height="80" rx="6"/><text x="34" y="50">seats</text>
+        <text x="34" y="70">read → member</text><text x="34" y="86">read → speaker</text><text x="34" y="102">bash → member</text>
+        <rect class="empty" x="166" y="30" width="110" height="80" rx="6"/><text x="176" y="50">seats</text>
+        <text x="176" y="76" class="lbl">(nothing)</text>
+        <text x="24" y="134" class="lbl">regroup() writes here</text><text x="166" y="134" class="lbl">nobody writes here</text>
+      </svg>
+      <p><b>The planner fills copy 1.</b> Copy 2 is never written to.</p>
+    </div>
+    <div class="frame" aria-label="frame three: the bash row asks copy 2 and is told it is a plain row">
+      <svg viewBox="0 0 300 150">
+        <rect class="file" x="24" y="20" width="252" height="34" rx="5"/><text x="34" y="41">● Bash(echo one)  asks roleOf(id)</text>
+        <path class="arrow" d="M221 56 L221 84"/>
+        <rect class="empty" x="166" y="86" width="110" height="34" rx="6"/><text x="176" y="107">copy 2 → "row"</text>
+        <rect class="full" x="24" y="86" width="110" height="34" rx="6" opacity=".35"/><text x="34" y="107" opacity=".5">copy 1 → "speaker"</text>
+        <text x="24" y="140" class="lbl">the read beside it hides · nothing replaces it</text>
+      </svg>
+      <p><b>Bash asks copy 2.</b> Told "row", it draws itself. The read beside it hides and no line replaces it.</p>
+    </div>
+  </div>
+  <p>The tests are green because they load every file through one cache. Fix: planner state on the process, the way <code>click.ts</code> keeps its patch, and a test that loads files the way pi does.</p>
+  <details><summary>Two smaller rules stop the rest from folding</summary>
+    <p>A <span class="term" data-x="lone call">lone call</span> never folds: <code>group.ts:232</code> keeps a settled group of one as a full row. Claude Code folds it to <code>Ran 1 shell command</code>.</p>
+    <p>The <span class="term" data-x="prose rule">prose rule</span> counts a hidden thinking block as speech, so it ends the group. Claude Code skips thinking blocks. With hidden thinking on and a thinking model, nearly every call is alone in its group. <span class="tag derived">derived · group.ts:538</span></p>
+  </details>
+
+  <h2 style="margin-top:56px">Why the agent rows are wide open: they never got the receipt</h2>
+  <p>A tool row pi draws itself sits in a padded box under a spacer: three blank lines. A row with our receipt draws exactly one. <span class="term" data-x="pi-subagents">pi-subagents</span> draws the <span class="term" data-x="launch row">launch row</span> and the <span class="term" data-x="completion notice">completion notice</span> itself, and gives <span class="term" data-x="result blob">get_subagent_result</span> no renderer at all. <span class="tag derived">derived · tool-execution.js:44,48,197</span></p>
+  <p>The kit cannot take those rows today because of one rule and one array:</p>
+  <div class="order" aria-label="package load order, now and after the flip">
+    <span class="k">NOW</span>
+    <div class="chain"><span class="pkg">pi-web-search</span><span class="ar">→</span><span class="pkg sub win">@tintinweb/pi-subagents</span><span class="ar">→</span><span class="pkg kit">~/dotfiles/pi/kit</span><span class="ar">→</span><span class="pkg">plannotator</span></div>
+    <span class="k">TARGET</span>
+    <div class="chain"><span class="pkg">pi-web-search</span><span class="ar">→</span><span class="pkg kit win">~/dotfiles/pi/kit</span><span class="ar">→</span><span class="pkg sub">@tintinweb/pi-subagents</span><span class="ar">→</span><span class="pkg">plannotator</span></div>
+  </div>
+  <p><span class="term" data-x="first wins">First wins</span>: whoever registers a name first keeps it. The ring marks who owns <code>Agent</code>. Flip two lines in <code>settings.json</code>. <span class="tag derived">derived · runner.js:324</span></p>
+  <details><summary>What the flip also changes</summary>
+    <p>Shortcuts are the opposite rule, last wins, and terminal-input listeners run in load order. After the flip pi-subagents wins a shortcut collision, and the kit sees <kbd>↓</kbd> before the vendor's list does. Both are fine once the vendor's list is off.</p>
+  </details>
+
+  <h2 style="margin-top:56px">Why <code>Thinking...</code> stays: pi draws it, not us</h2>
+  <p>The <span class="term" data-x="thinking stub">thinking stub</span> is pi's own line. An empty label still draws two blank lines: pi wraps even nothing in colour codes and counts it as content. Zero needs a <span class="term" data-x="pi patch">patch on pi's component</span>, and a PR upstream so the patch can go. <span class="tag derived">derived · assistant-message.js:74,109 · ran it</span></p>
+</section>
+
+<section id="plan">
+  <h2>The plan, in the order the slider plays it</h2>
+  <ol class="ladder" id="ladder">
+    <li data-step="1"><span class="n">1</span><span>Bash folds <small>Planner state on the process. Lone calls fold. A test that loads files the way pi does.</small></span><span class="cost">kit · half a day</span></li>
+    <li data-step="2"><span class="n">2</span><span>Thinking gone <small>Patch pi's component at load; hidden thinking no longer breaks a group. PR upstream.</small></span><span class="cost">kit + PR · hours</span></li>
+    <li data-step="3"><span class="n">3</span><span>Three settings off <small><code>fleetView</code>, <code>widgetMode</code>, <code>outputTranscript</code>. Kit above pi-subagents. <code>general-purpose.md</code> with <span class="term" data-x="nested agents">nested agents</span>. Our own <span class="term" data-x="skill line">skill line</span>.</small></span><span class="cost">config · minutes</span></li>
+    <li data-step="4"><span class="n">4</span><span>Kit owns the agent rows <small><code>Agent</code>, <code>get_subagent_result</code>, <code>steer_subagent</code> registered first, forwarded over the <span class="term" data-x="RPC bus">RPC bus</span>, wearing the receipt. Completion becomes one line. Agents write reports to files.</small></span><span class="cost">kit · a day</span></li>
+    <li data-step="5"><span class="n">5</span><span>Count in the rule and a modal <small>Claude Code's <span class="term" data-x="footer pill">footer pill</span>, moved into our bottom rule, and its <span class="term" data-x="tasks modal">tasks modal</span>. Nothing on screen when nothing runs.</small></span><span class="cost">kit · half a day</span></li>
+    <li data-step="6"><span class="n">6</span><span>Small ones <small>Plural tokens. The <span class="term" data-x="plan hint">plan hint</span> with its key. Delete the duplicate <code>herdr-agent-state.ts</code>. Fix the <code>~/2</code> ledger line.</small></span><span class="cost">kit · an hour</span></li>
+  </ol>
+
+  <details style="margin-top:40px"><summary>What can break, and how each is caught</summary>
+  <table aria-label="failure modes and how each is caught">
+    <thead><tr><th>What fails</th><th>How you would notice</th><th>What we do</th></tr></thead>
+    <tbody>
+      <tr><td>A pi upgrade renames the patched thinking method</td><td>Stubs come back</td><td>A kit test imports the installed pi and asserts the method exists. Red test, not a silent slide.</td></tr>
+      <tr><td>RPC spawn drops an option it does not know</td><td>An agent runs foreground or without a model</td><td>Kit validates keys against the documented list before calling spawn.</td></tr>
+      <tr><td>Our consume lands after the 200 ms grace</td><td>Two completion notices</td><td>Consume synchronously inside the completed handler. Test it with a fake clock.</td></tr>
+      <tr><td>Two copies of a kit file load again</td><td>A future bash-style bug</td><td>All cross-row state behind <code>Symbol.for</code>. The two-cache test guards it.</td></tr>
+      <tr><td>Nested agents are invisible to the fleet</td><td>Token spend that shows only on the parent</td><td>Known limit. Their transcripts still land in the same output folder.</td></tr>
+    </tbody>
+  </table>
+  </details>
+</section>
+
+<section id="decide">
+  <h2>Five picks</h2>
+
+  <h3>1 · The agents panel</h3>
+  <div class="options">
+    <div class="option pick"><span class="rec">recommended</span><h4>Count in the bottom rule</h4><p class="trade"><code>1 task ↓</code> sits in our own rule, beside the branch and the context bar. <kbd>↓</kbd> opens a modal. No hint row, no extra line, nothing when nothing runs.</p></div>
+    <div class="option"><h4>Claude Code's footer item</h4><p class="trade">A separate dim row under the editor, <code>2 tasks · ↓ to view</code>. Same modal. Costs one line while agents run.</p></div>
+    <div class="option"><h4>Inline list that folds</h4><p class="trade"><kbd>↓</kbd> opens a list below the editor, <kbd>↑</kbd> from <code>main</code> folds it away. Familiar. Not what Claude Code does.</p></div>
+  </div>
+  <div class="answer" data-q="1 panel"><label>Panel</label><div class="row"><label><input type="radio" name="q1" value="rule"> count in the rule + modal</label><label><input type="radio" name="q1" value="modal"> footer row + modal</label><label><input type="radio" name="q1" value="inline"> inline list, ↑ folds</label></div><textarea placeholder="comment"></textarea></div>
+
+  <h3>2 · What a result shows</h3>
+  <div class="options">
+    <div class="option pick"><span class="rec">recommended</span><h4>Head, three lines</h4><p class="trade">First three lines, then <code>… +70 lines (ctrl+o to expand)</code>. Claude Code's. Tells you where to press.</p></div>
+    <div class="option"><h4>Tail, one line</h4><p class="trade">Last line, <code>+N lines</code>. Ours today. Shorter. No hint.</p></div>
+  </div>
+  <div class="answer" data-q="2 result preview"><label>Result preview</label><div class="row"><label><input type="radio" name="q2" value="head3"> head, three lines</label><label><input type="radio" name="q2" value="tail1"> tail, one line</label></div><textarea placeholder="comment"></textarea></div>
+
+  <h3>3 · The bash header</h3>
+  <div class="options">
+    <div class="option pick"><span class="rec">recommended</span><h4>Two lines, then …</h4><p class="trade">Claude Code's cap: 2 lines, 160 characters. A long command keeps its tail.</p></div>
+    <div class="option"><h4>One line, then …</h4><p class="trade">Ours today. Tidier. Loses the end of every long command.</p></div>
+  </div>
+  <div class="answer" data-q="3 bash header"><label>Header</label><div class="row"><label><input type="radio" name="q3" value="two"> two lines</label><label><input type="radio" name="q3" value="one"> one line</label></div><textarea placeholder="comment"></textarea></div>
+
+  <h3>4 · A lone call</h3>
+  <div class="options">
+    <div class="option pick"><span class="rec">recommended</span><h4>Fold it</h4><p class="trade"><code>Ran 1 shell command</code>. The row changes shape once, at settle. Claude Code does the same.</p></div>
+    <div class="option"><h4>Keep the row</h4><p class="trade">Today's rule. The command line stays readable. Nearly nothing folds while thinking is hidden.</p></div>
+  </div>
+  <div class="answer" data-q="4 lone call"><label>Lone call</label><div class="row"><label><input type="radio" name="q4" value="fold"> fold</label><label><input type="radio" name="q4" value="keep"> keep the row</label></div><textarea placeholder="comment"></textarea></div>
+
+  <h3>5 · The thinking stub</h3>
+  <div class="options">
+    <div class="option pick"><span class="rec">recommended</span><h4>Patch now, PR upstream</h4><p class="trade">Zero lines today. The patch is pinned by a test against the installed pi and retires when the PR lands.</p></div>
+    <div class="option"><h4>Wait for upstream</h4><p class="trade">No patch to maintain. The stub stays until pi ships it.</p></div>
+  </div>
+  <div class="answer" data-q="5 thinking stub"><label>Thinking stub</label><div class="row"><label><input type="radio" name="q5" value="patch"> patch + PR</label><label><input type="radio" name="q5" value="wait"> wait</label></div><textarea placeholder="comment"></textarea></div>
+</section>
+
+</main>
+
+<aside class="dict" aria-label="dictionary">
+  <h2>dictionary</h2>
+  <h3>the screen</h3>
+  <dl id="dict"></dl>
+</aside>
+</div>
+
+<div class="panel" id="panel" role="dialog" aria-modal="false" aria-label="explanation"></div>
+
+<script>
+// ---------- explain entries (mirror of explain.md) ----------
+const X = {
+"receipt":{t:"receipt",q:[["what","The one-or-two-line shape a finished tool call leaves behind: ● Read(path) then ⎿ Read 42 lines. A receipt for work done, not the work itself."],["where","~/dotfiles/pi/kit/extensions/transcript/ — about 2,900 lines of TypeScript: row.ts, header.ts, result.ts, receipt.ts."],["how we work on it","npm test in the kit; node test/preview-transcript.mjs to look."],["goes wrong","A tool that never got a receipt falls back to pi's padded box: three blank lines and raw text at column 0. That is most of the ugliness on this page."]]},
+"rollup":{t:"rollup",q:[["what","The dim line that replaces several receipts once the turn settles: Read 1 file, ran 3 shell commands. Claude Code calls it a collapsed read/search group."],["where","transcript/rollup.ts (the phrase table) and group.ts (who folds into whom)."],["goes wrong","Bash rows never fold today, and a lone call never folds."]]},
+"planner":{t:"planner",q:[["what","Decides, for each row, whether it speaks for a group, hides inside one, or stands alone. One map called seats."],["where","transcript/group.ts:150 (seats), :211 (roleOf)."],["goes wrong","pi loads every extension file with its own module cache, so bash.ts gets a second, empty copy. Bash rows ask the empty copy and are told 'row'."],["fix","Keep the map on the process behind Symbol.for(...), the way click.ts already keeps its patch. Add a test that loads the two files through two caches."]]},
+"planner copy":{t:"planner copy",q:[["what","The second evaluation of group.ts that bash.ts sees. Same code, different memory."],["where","Made by pi/dist/core/extensions/loader.js:417 — createJiti with moduleCache: false."],["so what","This is why read folds and bash does not. It is also why the tests are green: they load everything through one cache."]]},
+"lone call":{t:"lone call",q:[["what","A settled group with one member. group.ts:232 keeps it as a full row on purpose. Claude Code folds it to Ran 1 shell command."],["decision","Fold it. The row changes shape once, at settle, which is what Claude Code does too."]]},
+"prose rule":{t:"prose rule",q:[["what","A message that says anything ends the current group. Claude Code has the same rule and keeps the prose on screen."],["where","group.ts:57-63 (the comment), :538 (speaks)."],["goes wrong","A hidden thinking block counts as saying something. Claude Code skips thinking blocks. Once ours does too, calls on either side of a thought fold together."]]},
+"thinking stub":{t:"thinking stub",q:[["what","The italic Thinking... line pi prints for every hidden reasoning block."],["where","pi/dist/modes/interactive/interactive-mode.js:271 (the label); components/assistant-message.js:74,109 (spacer + line)."],["goes wrong","An empty label still draws a line of colour codes, plus a spacer: two blanks. No extension API reaches zero."],["fix","Patch pi's component at load (the kit already patches one pi internal) and send the change upstream."]]},
+"first wins":{t:"first wins",q:[["what","pi's rule when two extensions register the same tool name or message type: the one that loaded first keeps it. Load order is the packages array in settings.json."],["where","pi/dist/core/extensions/runner.js:324-335, 425-433."],["so what","The kit is third in that array, behind pi-subagents, so it cannot own any agent surface until the order flips. Shortcuts are the opposite (last wins), so the flip also changes who sees a key first."]]},
+"pi-subagents":{t:"pi-subagents",q:[["what","The vendor package that gives pi the Agent, get_subagent_result and steer_subagent tools, the completion notice, the Agents widget and the fleet dock. Pinned at 0.19.0."],["where","~/.pi/agent/npm/node_modules/@tintinweb/pi-subagents/src/"],["how we work on it","Never edit it. Settings in ~/dotfiles/pi/subagents.json; its RPC bus for spawning from our own tool."],["goes wrong","Its rows do not wear the receipt, so each costs three blank lines and a different glyph vocabulary."]]},
+"launch row":{t:"launch row",q:[["what","What the Agent tool draws when it starts a background agent: ▸ Agent description, then ⎿ Running in background (ID: …)."],["where","pi-subagents/src/index.ts:1707."],["target","Claude Code's ● 2 background agents launched (↓ to manage) with a ├─ tree of names. Needs the kit to own Agent first and forward to the RPC bus."]]},
+"completion notice":{t:"completion notice",q:[["what","The ✓ description completed block with stats, a preview line and the transcript path."],["where","pi-subagents/src/index.ts:308-370; the model text at :171-199."],["target","One receipt line: Done · 15 tools · 71.9k tokens · 1m14s. The screen half is a renderer the kit can own once the order flips. The model half cannot be edited, only replaced: consume the vendor's notice and send our own."]]},
+"result blob":{t:"result blob",q:[["what","The get_subagent_result output printed raw: bold name, header fields, markdown source, … (71 more lines)."],["where","No renderer in pi-subagents (index.ts:2732), so pi's fallback draws it (tool-execution.js:105-125): ten lines, no gutter, column 0."],["target","Agents write their report to a file, the orchestrator reads it: Read 1 file. The transcript already knows that shape. No renderer to fight."]]},
+"Agents widget":{t:"Agents widget",q:[["what","The ● Agents └ Agent (twin) … ↻14 · 23 tool uses · 89.1k token (9%) · 109.7s block above the editor while a background agent runs. It goes when the last agent finishes, which reads as 'sometimes it stays'."],["where","pi-subagents/src/ui/agent-widget.ts:628; setting widgetMode, 'background' today."],["fix","widgetMode: 'off'."]]},
+"fleet dock":{t:"fleet dock",q:[["what","The permanent list below the editor: ● main, one row per agent, 1 running agent."],["where","pi-subagents/src/ui/fleet-list.ts:223; setting fleetView."],["fix","fleetView: false, then the kit draws Claude Code's shape."]]},
+"footer pill":{t:"footer pill",q:[["what","Claude Code's whole idle-state agent UI: one dim item in the prompt footer, 2 tasks · ↓ to view. Nothing when there are no tasks."],["ours","The same count, 1 task ↓, drawn inside the bottom rule of the prompt frame next to the branch and context bar. zen-chrome owns that rule, so it costs no row. The vendor's esc to interrupt · ← for agents · ↓ to manage row is the fleet dock's hint and goes with fleetView: false."],["where","CC/components/tasks/BackgroundTaskStatus.tsx:220-232; ours in kit/extensions/zen-chrome/chrome.ts bottomRule."],["keys","↓ opens the modal, Esc closes it. Nothing to fold, because nothing was open."]]},
+"tasks modal":{t:"tasks modal",q:[["what","Claude Code's Background tasks dialog over the whole screen: a row per agent with elapsed and tokens; ↑/↓ select · Enter view · x stop · Esc close."],["where","CC/components/tasks/BackgroundTasksDialog.tsx:560-651."],["so what","The multi-row list exists only here. There is no inline list to fold."]]},
+"transcript path":{t:"transcript path",q:[["what","The /var/folders/…/tasks/9cc0afca-4f6a-475.output line in the completion notice: 120 characters, wrapped to column 0."],["where","pi-subagents/src/index.ts:344; setting outputTranscript."],["fix","outputTranscript: false removes it from the screen and from the model text."]]},
+"skill line":{t:"skill line",q:[["what","The [skill] design-page (ctrl+o to expand) message after a $skill mention: three blanks above, two below."],["where","kit/extensions/skill-mentions.ts:186 returns pi's own boxed component (padding 1/1) under pi's spacer."],["fix","Return a one-line component of our own. Kit only."]]},
+"blank lines":{t:"blank lines",q:[["what","pi's spacing rules. A tool row in the default shell: spacer + box padding = three blanks. A receipt (renderShell: 'self'): exactly one blank, hardcoded. A custom message: one spacer, plus box padding if the renderer reuses pi's box."],["where","tool-execution.js:44,48,197; custom-message.js:21."],["so what","Every extra blank on this page is a row that did not get the receipt shell."]]},
+"nested agents":{t:"nested agents",q:[["what","Whether a subagent gets its own Agent tool. Off unless the agent's definition sets allowed_subagents; never when isolated in a worktree; capped at depth 2."],["where","pi-subagents/src/agent-runner.ts:847-865. The built-in general-purpose sets none."],["fix","~/dotfiles/pi/agents/general-purpose.md with allowed_subagents: all. Also correct the ~/2 ledger line that says seats can spawn: three of five tracks wrote 'no Agent tool'; one ran pi -p from bash 33 times."]]},
+"head preview":{t:"head preview",q:[["what","Claude Code's result shape: the first three lines, then … +70 lines (ctrl+o to expand). Ours: the last line, +N lines, no hint."],["where","CC/utils/terminal.ts:71-113; ours transcript/result.ts:138-168."]]},
+"two-line header":{t:"two-line header",q:[["what","Claude Code lets a bash header run two lines, 160 characters, before …. Ours clips at one line."],["where","CC/tools/BashTool/UI.tsx:25-26; ours transcript/header.ts:139."]]},
+"plan hint":{t:"plan hint",q:[["what","The └  to expand line under a plan with no key in it."],["where","kit/extensions/todos/index.ts:159 asks the keybinding registry for a raw chord; it returns nothing."],["fix","Format the same value that was passed to registerShortcut."]]},
+"RPC bus":{t:"RPC bus",q:[["what","pi-subagents' documented way for another extension to spawn, consume or inspect agents without owning its code: subagents:rpc:spawn, subagents:rpc:consume, the registry at Symbol.for('pi-subagents:manager')."],["where","pi-subagents/docs/rpc.md."],["goes wrong","spawn drops eight option fields silently and never validates keys; consume must land within 200 ms of completion or the vendor's notice fires anyway."]]},
+"pi patch":{t:"pi patch",q:[["what","Replacing one method on a pi class at load time, from the kit, keyed by a Symbol.for so two copies of the kit file patch once."],["where","Precedent: transcript/click.ts on TuiAltScreen.handleViewportInput."],["goes wrong","A pi upgrade renames the method. A kit test that imports the installed pi and asserts the method exists turns that into a red test, not a silent regression."]]},
+"prose":{t:"the model's words",q:[["what","Text the model wrote between its calls. Kept on screen at every step. Claude Code keeps it too; it folds the shell, not the sentence."]]},
+"editor":{t:"editor and footer",q:[["what","pi's input box and the kit's footer line: cwd, model, branch, context bar, key hints. Stays. At step 5 the bottom rule gains 1 task ↓ when agents run."]]}
+};
+
+// ---------- the turn: blocks, each with 'now' lines and a 'target' per step ----------
+// owner: pi | sub | kit | prose | chrome. b: blank line.
+const B = (n)=>Array(n).fill("");
+const A = [
+ {x:"thinking stub", own:"pi", now:["", "\u001bital Thinking..."], at:{2:[]}},
+ {x:"prose", own:"prose", now:["", "Understood. Three things you named that I haven't pinned down yet: the Thinking... stub, the spacing, and the ↓ panel folding on ↑."]},
+ {x:"launch row", own:"sub", now:["","","\u001bbold ▸ Agent  Audit transcript spacing/results/thinking","  ⎿  Running in background (ID: 65855625-0272-476)","","","","\u001bbold ▸ Agent  CC background agents panel spec","  ⎿  Running in background (ID: 9cc0afca-4f6a-475)","",""],
+   at:{4:["","\u001bok ● \u001b 2 background agents launched \u001bdim (↓ to manage)","  ├─ Agent  Audit transcript spacing/results/thinking","  └─ Agent  CC background agents panel spec"]}, ownAt:{4:"kit"}},
+ {x:"prose", own:"prose", now:["", "Two agents out: ugly-audit and cc-agents-panel. I'll come back with a full defect list."]},
+ {x:"thinking stub", own:"pi", now:["", "\u001bital Thinking..."], at:{2:[]}},
+ {x:"prose", own:"prose", now:["", "Got it. Exactly what I sent cc-agents-panel to spec, with one more detail from your screenshot I'll hold it to."]},
+ {x:"completion notice", own:"sub", now:["","","\u001bok ✓ \u001bbold CC background agents panel spec \u001bdim completed","  15 tool uses · 71.9k token · 74.0s","  ⎿  ## Claude Code background tasks panel — spec","  transcript:","/var/folders/7_/rs7xyzgx61v0l0pcb2tszzt40000gn/T/pi-subagents-501/Users-joel-dotfiles/01a062f2-ff56-7b98-9b15-afc13326aeb9/tasks/9cc0afca-4f6a-475.outp","ut","",""],
+   at:{3:["","","\u001bok ✓ \u001bbold CC background agents panel spec \u001bdim completed","  15 tool uses · 71.9k token · 74.0s","  ⎿  ## Claude Code background tasks panel — spec","",""],
+       4:["","\u001bok ● \u001b Agent(CC background agents panel spec)","  ⎿  Done · 15 tools · 71.9k tokens · 1m14s"]}, ownAt:{4:"kit"}},
+ {x:"result blob", own:"pi", now:["","\u001bbold get_subagent_result","Agent: 9cc0afca-4f6a-475","Type: Agent | Status: completed | Tool uses: 15 | 71.9k token | Context: 7% | Duration: 74.0s","Description: CC background agents panel spec","","## Claude Code background tasks panel — spec","","**Two components, two states, not one inline list:**","1. A **footer pill** in the prompt (collapsed indicator), rendered inline in the input footer.","2. A **modal `Dialog` overlay** (`BackgroundTasksDialog`) that pops over the whole UI.","","\u001bdim ... (71 more lines, ctrl+o to expand)","",""],
+   at:{4:["","\u001bdim   Read 1 file"]}, ownAt:{4:"kit"}},
+ {x:"Agents widget", own:"sub", now:["\u001bok ● \u001b Agents","└ .: \u001bbold Agent \u001b(twin)  Audit transcript spacing/results/thinking · ↻14 · 23 tool uses · 89.1k token (9%) · 109.7s","    ⎿  That first grep was expensive; I'll be surgical from here."], at:{3:[]}},
+ {x:"editor", own:"chrome", now:["\u001bchrome ─ ~/dotfiles ──────────────────────────────────────────── claude-fable-5-1 medium","\u001bchrome  ▍","\u001bchrome ─ main ─────────────────────────────────────────────────────────────── 9.3%","\u001bdim  esc to interrupt · ← for agents · ↓ to manage"],
+   at:{3:["\u001bchrome ─ ~/dotfiles ──────────────────────────────────────────── claude-fable-5-1 medium","\u001bchrome  ▍","\u001bchrome ─ main ─────────────────────────────────────────────────────────────── 9.3%","\u001bdim  esc to interrupt"],
+       5:["\u001bchrome ─ ~/dotfiles ──────────────────────────────────────────── claude-fable-5-1 medium","\u001bchrome  ▍","\u001bchrome ─ main ──────────────────────────────────────────── 1 task ↓ ──── 9.3%"]}},
+ {x:"fleet dock", own:"sub", now:["","\u001bok  ● \u001b main"," ○ Agent  Audit transcript spacing/results/thinking                              110s · ↓ 89.1k tokens","\u001bdim « 1 running agent"], at:{3:[]}}
+];
+const Bt = [
+ {x:"thinking stub", own:"pi", now:["", "\u001bital Thinking..."], at:{2:[]}},
+ {x:"planner", own:"kit", now:["","\u001bok ● \u001b Bash(cd /Users/joel/dotfiles/pi/kit/extensions/zen-chrome && rg …)","  ⎿  471:    pi.on(\"session_start\", (_event, ctx) => {  \u001bdim +7 lines","","\u001bok ● \u001b Bash(cd /Users/joel/dotfiles/pi/kit/extensions/zen-chrome && sed…)","  ⎿      marked[marked.length - 1] = ZONE_END + ZONE_FINA…  \u001bdim +59 lines"],
+   at:{1:["","\u001bdim   Ran \u001bbold 2 \u001bdim shell commands"], 2:["","\u001bdim   Ran \u001bbold 3 \u001bdim shell commands"]}},
+ {x:"thinking stub", own:"pi", now:["", "\u001bital Thinking..."], at:{2:[]}},
+ {x:"planner", own:"kit", now:["","\u001bok ● \u001b Bash(PI_ROOT=\"$(npm root -g)/@earendil-works/pi-coding-agent\"; r…)","  ⎿  29:export { getLanguageFromPath, getMarkdownTheme, g…  \u001bdim +2 lines"],
+   at:{1:["","\u001bdim   Ran \u001bbold 1 \u001bdim shell command"], 2:[]}}
+];
+const STEPS = ["now","1 bash folds","2 thinking gone","3 three settings","4 kit owns agent rows","5 count in the rule"];
+const NOTES = [
+ "<b>Now.</b> Two turns. The model said four sentences; the rest is receipts and air.",
+ "<b>Step 1.</b> Nothing changes in this turn: no bash here. See the bash turn below.",
+ "<b>Step 2.</b> The two Thinking... stubs go, with their spacers. In the bash turn, the calls either side of a thought now fold together.",
+ "<b>Step 3.</b> Three settings: the Agents widget, the fleet dock and the transcript path go. Screen and model text.",
+ "<b>Step 4.</b> The kit owns the agent rows. Launch is one line with a tree; completion is one receipt; the result is a file we read.",
+ "<b>Step 5.</b> The bottom rule gains <code>1 task ↓</code> while agents run. The hint row is gone. Nothing else on screen."
+];
+
+function linesAt(block, step){
+  let out = block.now, own = block.own;
+  if (block.at) for (let s=1;s<=step;s++){ if (block.at[s]!==undefined) out = block.at[s]; }
+  if (block.ownAt) for (let s=1;s<=step;s++){ if (block.ownAt[s]) own = block.ownAt[s]; }
+  return {lines:out, own};
+}
+function esc(s){return s.replace(/&/g,"&amp;").replace(/</g,"&lt;")}
+function styled(s){
+  // \u001bclass text  → <span class>. \u001b alone resets.
+  const parts = s.split("\u001b"); let html = esc(parts[0]);
+  for (let i=1;i<parts.length;i++){ const m = parts[i].match(/^(\w+) ([\s\S]*)$/);
+    html += m ? `<span class="${m[1]}">${esc(m[2])}</span>` : esc(parts[i]); }
+  return html;
+}
+function render(el, blocks, step, prevStep){
+  el.innerHTML = "";
+  let n = 0;
+  blocks.forEach((b,bi)=>{
+    const {lines, own} = linesAt(b, step);
+    const prev = linesAt(b, prevStep).lines;
+    const changed = prevStep!==step && prev!==lines;
+    const willChange = step<5 && b.at && Object.keys(b.at).some(k=>+k===step+1);
+    lines.forEach(t=>{
+      const d = document.createElement("div");
+      d.className = "ln " + (own==="prose"||own==="chrome" ? "" : own) + (t===""?" blank":"") + " click" + (changed?" new":"") + (willChange?" next":"");
+      d.innerHTML = t===""? " " : styled(t);
+      d.dataset.x = b.x; d.tabIndex = 0;
+      el.appendChild(d); n++;
+    });
+  });
+  return n;
+}
+let cur = 0, prev = 0;
+const baseA = (()=>{let n=0; A.forEach(b=>n+=b.now.length); return n})();
+const baseB = (()=>{let n=0; Bt.forEach(b=>n+=b.now.length); return n})();
+function update(step){
+  prev = cur; cur = step;
+  const nA = render(document.getElementById("termA"), A, step, prev);
+  const nB = render(document.getElementById("termB"), Bt, step, prev);
+  document.getElementById("countA").textContent = nA;
+  document.getElementById("countB").textContent = nB;
+  document.getElementById("ctxA").style.width = (100*nA/baseA)+"%";
+  document.getElementById("ctxB").style.width = (100*nB/baseB)+"%";
+  document.getElementById("deltaA").textContent = nA===baseA ? "" : `was ${baseA}`;
+  document.getElementById("deltaB").textContent = nB===baseB ? "" : `was ${baseB}`;
+  document.getElementById("stepnote").innerHTML = NOTES[step];
+  document.querySelectorAll("#ticks span").forEach((s,i)=>s.classList.toggle("on", i===step));
+  document.querySelectorAll("#ladder li").forEach(li=>li.classList.toggle("on", +li.dataset.step===step));
+  document.getElementById("step").value = step;
+}
+const ticks = document.getElementById("ticks");
+STEPS.forEach((s,i)=>{const sp=document.createElement("span"); sp.textContent=s; sp.onclick=()=>update(i); ticks.appendChild(sp)});
+document.getElementById("step").addEventListener("input", e=>update(+e.target.value));
+document.querySelectorAll("#ladder li").forEach(li=>{ li.style.cursor="pointer"; li.addEventListener("click", ()=>{ update(Math.min(5,+li.dataset.step)); document.getElementById("turn").scrollIntoView({behavior:"smooth"}) }) });
+update(Math.min(5, Math.max(0, +(new URLSearchParams(location.search).get("step")||0))));
+
+// ---------- dictionary ----------
+const dict = document.getElementById("dict");
+const ORDER = ["receipt","rollup","planner","planner copy","lone call","prose rule","thinking stub","blank lines","first wins","pi-subagents","launch row","completion notice","result blob","Agents widget","fleet dock","transcript path","skill line","footer pill","tasks modal","nested agents","head preview","two-line header","plan hint","RPC bus","pi patch"];
+ORDER.forEach(k=>{ const e=X[k]; const dt=document.createElement("dt"); dt.textContent=e.t; dt.dataset.k=k; const dd=document.createElement("dd"); dd.textContent=e.q[0][1].split(". ")[0].replace(/\.$/,"")+"."; dict.appendChild(dt); dict.appendChild(dd); });
+
+// ---------- explain panel ----------
+const panel = document.getElementById("panel");
+let openFor = null;
+function openPanel(key, target){
+  const e = X[key]; if(!e) return;
+  if (openFor===target){ closePanel(); return; }
+  openFor = target;
+  panel.innerHTML = `<h4>${esc(e.t)}</h4><dl>${e.q.map(([k,v])=>`<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}</dl>`;
+  const r = target.getBoundingClientRect();
+  const w = Math.min(480, window.innerWidth-32);
+  let left = r.left, top = r.bottom+8;
+  if (left+w > window.innerWidth-16) left = window.innerWidth-16-w;
+  panel.style.left = left+"px"; panel.style.top = top+"px"; panel.style.maxWidth = w+"px";
+  panel.style.setProperty("--origin", `${Math.max(0,r.left-left)+12}px top`);
+  panel.classList.remove("closing"); panel.classList.add("open");
+  requestAnimationFrame(()=>{ const pr = panel.getBoundingClientRect(); if (pr.bottom>window.innerHeight-12){ panel.style.top = Math.max(12, r.top-8-pr.height)+"px"; panel.style.setProperty("--origin","12px bottom"); } });
+  light(key);
+}
+function closePanel(){ if(!openFor) return; panel.classList.add("closing"); panel.classList.remove("open"); openFor=null; }
+function light(key){ document.querySelectorAll("#dict dt").forEach(d=>{ const on=d.dataset.k===key; d.classList.toggle("lit",on); if(on) d.scrollIntoView({block:"nearest"}); }); }
+document.addEventListener("click", e=>{
+  const t = e.target.closest("[data-x]");
+  if (t){ e.stopPropagation(); openPanel(t.dataset.x, t); return; }
+  if (!panel.contains(e.target)) closePanel();
+});
+document.addEventListener("keydown", e=>{
+  if (e.key==="Escape") closePanel();
+  if ((e.key==="Enter"||e.key===" ") && document.activeElement && document.activeElement.dataset && document.activeElement.dataset.x){ e.preventDefault(); openPanel(document.activeElement.dataset.x, document.activeElement); }
+});
+document.querySelectorAll(".term").forEach(t=>{ t.tabIndex=0; t.addEventListener("mouseenter", ()=>light(t.dataset.x)); });
+document.querySelectorAll("#dict dt").forEach(d=>{ d.style.cursor="pointer"; d.classList.add("term"); d.dataset.x=d.dataset.k; });
+
+// ---------- strip: you are here ----------
+const stations = [...document.querySelectorAll(".station")];
+const io = new IntersectionObserver(es=>{ es.forEach(en=>{ if(en.isIntersecting){ stations.forEach(s=>s.classList.toggle("on", s.getAttribute("href")==="#"+en.target.id)); } }) },{rootMargin:"-40% 0px -55% 0px"});
+document.querySelectorAll("section[id]").forEach(s=>io.observe(s));
+
+// ---------- theme ----------
+const root=document.documentElement, tt=document.getElementById("themeToggle");
+const saved=localStorage.getItem("theme"); if(saved) root.dataset.theme=saved;
+tt.onclick=()=>{ const next = root.dataset.theme==="light"?"dark":"light"; root.dataset.theme=next; localStorage.setItem("theme",next); };
+</script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+# Machine-wide git ignore. Git reads this from ~/.config/git/ignore without any
+# core.excludesfile setting; install.sh links it there. Entries belong here only
+# when they can appear in *any* repo through no fault of the repo itself —
+# per-repo noise stays in that repo's .gitignore.
+
+# macOS writes these into any directory opened in Finder.
+.DS_Store
+
+# pi-background-tasks spools job output and delegate/Fusion artifacts under
+# whatever directory pi was started in. The package never deletes them (they
+# double as local audit evidence), so any repo you run a background job,
+# delegate, or Fusion task in grows these.
+.pi/tasks/
+.pi/delegate/
+.pi/fusion/
