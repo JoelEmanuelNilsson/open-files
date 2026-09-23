@@ -557,6 +557,7 @@ const load = async (path) =>
 		registerShortcut: () => {},
 		registerMessageRenderer: () => {},
 		on: (name) => events.push(name),
+		events: { on: () => () => {}, emit: () => {} },
 	});
 await load("transcript/index.ts");
 

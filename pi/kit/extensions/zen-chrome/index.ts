@@ -51,6 +51,7 @@ import { foldRows, isPromptFolded } from "./fold.ts";
 import { type CacheWindow, cacheLabel, nextRedrawMs, readCacheWindow } from "../../lib/cache-window.ts";
 import { isChatSeat } from "../../lib/seat.ts";
 import { shared } from "../../lib/shared.ts";
+import { isSideModeOn } from "../../lib/side-mode.ts";
 import { inputsKey, predictWarmth, prefixInputsOf, reasoningChangeCost, type Warmth, warmPrefixDir } from "../../lib/warm-prefix.ts";
 import {
 	advanceTurnClock,
@@ -62,7 +63,8 @@ import {
 	readTurnClock,
 } from "../../lib/turn-clock.ts";
 import { FADE_MS, fg, FRAME_MS, SHIMMER_FRAME_MS } from "./animate.ts";
-import { arcColor, arcTrack, driftColor, inkOf, isNotFrame, LABEL_LIGHT, shadeBox, shadeLine, waveEnabled } from "./prism.ts";
+import { createAnimationClock, type ReleaseFrames } from "./animation-clock.ts";
+import { arcColor, arcTrack, driftColor, FOLDED_BAR_LIGHT, inkOf, isNotFrame, LABEL_LIGHT, shadeBox, shadeLine, waveEnabled } from "./prism.ts";
 import { greyOut, wakeAt } from "./wake.ts";
 import { GLOW_NOTES, GLOWS, glowName, setGlowName } from "./choice.ts";
 import { notice } from "../../lib/notice.ts";
@@ -182,9 +184,19 @@ class ChromeState {
 		return this.ctx.ui.theme;
 	}
 
-	/** `~/code/pi`, plus the session name when one is set. */
+	/** `[SIDE] ~/code/pi`: the side-mode badge when on, the cwd, and the session name when one is set. */
 	location(): Piece[] {
-		return [...this.cwd(), ...this.sessionName()];
+		return [...this.sideBadge(), ...this.cwd(), ...this.sessionName()];
+	}
+
+	/** Bold `[SIDE] ` in `success` while side mode is on for this session, otherwise nothing. */
+	sideBadge(): Piece[] {
+		try {
+			if (!isSideModeOn(this.ctx.sessionManager.getSessionId())) return [];
+			return [{ text: "[SIDE]", paint: (text) => this.theme.bold(this.theme.fg("success", text)), atomic: true }, { text: " " }];
+		} catch {
+			return [];
+		}
 	}
 
 	/** `~/code/pi`: the working directory, home shortened to its glyph. */
@@ -575,6 +587,7 @@ class ChromeEditor extends CustomEditor {
 			const rows = foldRows(
 				width,
 				{
+					side: this.chrome.sideBadge(),
 					path: this.chrome.cwd(),
 					session: this.chrome.sessionName(),
 					branch: this.chrome.branch(),
@@ -638,7 +651,7 @@ class ChromeEditor extends CustomEditor {
 			const light = boxLight(now);
 			if (light !== null) {
 				const t = (now - light.since) / 1000;
-				if (folded) return rows.map((row) => shadeLine(row, t, "self", { fade: light.fade }));
+				if (folded) return rows.map((row) => shadeLine(row, t, "self", { light: FOLDED_BAR_LIGHT, fade: light.fade }));
 				return shadeBox(rows, t, { fade: light.fade });
 			}
 			const wake = boxWake(now);
@@ -650,7 +663,7 @@ class ChromeEditor extends CustomEditor {
 			// what a bar switching on looks like.
 			const t = (now - wake.since) / 1000;
 			const shone = folded
-				? rows.map((row) => shadeLine(row, t, "self", { fade: 1 - wake.light }))
+				? rows.map((row) => shadeLine(row, t, "self", { light: FOLDED_BAR_LIGHT, fade: 1 - wake.light }))
 				: shadeBox(rows, t, { tint: isNotFrame, fade: 1 - wake.light });
 			return greyOut(shone, wake.grey);
 		} catch {
@@ -697,11 +710,12 @@ export default function (pi: ExtensionAPI) {
 	let tui: TUI | undefined;
 	/** The seat this instance renders for; the cache window seam is keyed on it. */
 	let sessionId = "";
-	let timer: ReturnType<typeof setInterval> | undefined;
+	const animationClock = createAnimationClock(() => tui?.requestRender());
+	let waveFrames: ReleaseFrames | undefined;
 	let cacheTicker: ReturnType<typeof setTimeout> | undefined;
 	let floorTimer: ReturnType<typeof setTimeout> | undefined;
 	let secondTicker: ReturnType<typeof setInterval> | undefined;
-	let wakeFrames: ReturnType<typeof setInterval> | undefined;
+	let wakeFrames: ReleaseFrames | undefined;
 	/** Set only while this session is the one wearing the frame. */
 	let unframe: (() => void) | undefined;
 
@@ -716,20 +730,16 @@ export default function (pi: ExtensionAPI) {
 	 */
 	function startWakeFrames(): void {
 		if (wakeFrames || !tui || !WAVE || waking.since === null) return;
-		wakeFrames = setInterval(() => {
-			// `boxWake` drops the state on the last frame, so this render is the one
-			// that paints the bar at rest.
+		wakeFrames = animationClock.demandFrames(FRAME_MS, () => {
+			// `boxWake` drops the state on the last frame, so this tick's render is the
+			// one that paints the bar at rest.
 			if (boxWake(Date.now()) === null) stopWakeFrames();
-			tui?.requestRender();
-		}, FRAME_MS);
-		wakeFrames.unref?.();
+		});
 	}
 
 	function stopWakeFrames(): void {
-		if (wakeFrames) {
-			clearInterval(wakeFrames);
-			wakeFrames = undefined;
-		}
+		wakeFrames?.();
+		wakeFrames = undefined;
 	}
 
 	/**
@@ -746,8 +756,8 @@ export default function (pi: ExtensionAPI) {
 
 	let warm: WarmState = { glow: null, ledger: undefined, drift: null };
 	let warmthTicker: ReturnType<typeof setInterval> | undefined;
-	let shimmerTimer: ReturnType<typeof setInterval> | undefined;
-	let driftFrames: ReturnType<typeof setInterval> | undefined;
+	let shimmerFrames: ReleaseFrames | undefined;
+	let driftFrames: ReleaseFrames | undefined;
 	/**
 	 * The model and level the last request went out on — the state the cached
 	 * conversation was written at. Undefined until this seat has sent a turn,
@@ -765,17 +775,13 @@ export default function (pi: ExtensionAPI) {
 	const CHAT = isChatSeat();
 
 	function stopShimmer(): void {
-		if (shimmerTimer) {
-			clearInterval(shimmerTimer);
-			shimmerTimer = undefined;
-		}
+		shimmerFrames?.();
+		shimmerFrames = undefined;
 	}
 
 	function stopDrift(): void {
-		if (driftFrames) {
-			clearInterval(driftFrames);
-			driftFrames = undefined;
-		}
+		driftFrames?.();
+		driftFrames = undefined;
 	}
 
 	/**
@@ -834,24 +840,18 @@ export default function (pi: ExtensionAPI) {
 		// affordable because it is temporary: the next request clears the mark and
 		// with it these frames.
 		if (next.drift !== null && WAVE && tui) {
-			if (!driftFrames) {
-				driftFrames = setInterval(() => tui?.requestRender(), SHIMMER_FRAME_MS);
-				driftFrames.unref?.();
-			}
+			driftFrames ??= animationClock.demandFrames(SHIMMER_FRAME_MS);
 		} else {
 			stopDrift();
 		}
 		if (next.glow?.kind === "shimmer") {
-			if (!shimmerTimer && tui) {
-				shimmerTimer = setInterval(() => tui?.requestRender(), SHIMMER_FRAME_MS);
-				shimmerTimer.unref?.();
-			}
+			if (!shimmerFrames && tui) shimmerFrames = animationClock.demandFrames(SHIMMER_FRAME_MS);
 		} else {
 			stopShimmer();
 		}
 		// The ledger's countdown in the bottom rule moves on its own clock, and with
 		// the shimmer off nothing else is asking for frames; one a second is enough.
-		if (changed || (next.ledger?.kind === "warm" && !shimmerTimer)) tui?.requestRender();
+		if (changed || (next.ledger?.kind === "warm" && !shimmerFrames)) tui?.requestRender();
 	}
 
 	// ---- the level flash ----------------------------------------------------------
@@ -861,14 +861,12 @@ export default function (pi: ExtensionAPI) {
 	 * still fading; undefined once it has gone.
 	 */
 	let flashedAt: number | undefined;
-	let flashFrames: ReturnType<typeof setInterval> | undefined;
+	let flashFrames: ReleaseFrames | undefined;
 
 	function stopFlash(): void {
 		flashedAt = undefined;
-		if (flashFrames) {
-			clearInterval(flashFrames);
-			flashFrames = undefined;
-		}
+		flashFrames?.();
+		flashFrames = undefined;
 	}
 
 	/**
@@ -883,10 +881,7 @@ export default function (pi: ExtensionAPI) {
 	function flashLevel(): void {
 		if (!WAVE || !tui) return;
 		flashedAt = Date.now();
-		if (!flashFrames) {
-			flashFrames = setInterval(() => tui?.requestRender(), SHIMMER_FRAME_MS);
-			flashFrames.unref?.();
-		}
+		flashFrames ??= animationClock.demandFrames(SHIMMER_FRAME_MS);
 		// A second change during the fade moves the epoch on; whichever timeout finds
 		// the flash actually spent is the one that puts the light out.
 		setTimeout(() => {
@@ -903,14 +898,12 @@ export default function (pi: ExtensionAPI) {
 	 * the wave off or before there is a TUI to paint on.
 	 */
 	let tasksSince: number | undefined;
-	let tasksFrames: ReturnType<typeof setInterval> | undefined;
+	let tasksFrames: ReleaseFrames | undefined;
 
 	function stopTaskFrames(): void {
 		tasksSince = undefined;
-		if (tasksFrames) {
-			clearInterval(tasksFrames);
-			tasksFrames = undefined;
-		}
+		tasksFrames?.();
+		tasksFrames = undefined;
 	}
 
 	/**
@@ -933,10 +926,7 @@ export default function (pi: ExtensionAPI) {
 		}
 		if (!WAVE) return null;
 		tasksSince ??= Date.now();
-		if (!tasksFrames && tui) {
-			tasksFrames = setInterval(() => tui?.requestRender(), SHIMMER_FRAME_MS);
-			tasksFrames.unref?.();
-		}
+		if (!tasksFrames && tui) tasksFrames = animationClock.demandFrames(SHIMMER_FRAME_MS);
 		return tasksSince;
 	}
 
@@ -1041,7 +1031,7 @@ export default function (pi: ExtensionAPI) {
 		startTicking();
 		// No TUI (print mode, teardown) means nothing to animate, and with the wave
 		// off there is no reason to ask for frames at all.
-		if (!timer && tui && WAVE) timer = setInterval(() => tui?.requestRender(), FRAME_MS);
+		if (!waveFrames && tui && WAVE) waveFrames = animationClock.demandFrames(FRAME_MS);
 	};
 
 	// The box outline's light. It changes nothing but how the chrome looks, so it
@@ -1087,13 +1077,13 @@ export default function (pi: ExtensionAPI) {
 		// The light fades rather than stops: keep asking for frames until it has
 		// gone, then let the frame timer go with it.
 		fading.light = since === null ? null : { since, settledAt: now };
-		const frames = timer;
+		const frames = waveFrames;
 		if (frames) {
 			setTimeout(() => {
-				// A turn that started during the fade still owns the timer.
-				if (timer === frames && runningSince() === null) {
-					clearInterval(frames);
-					timer = undefined;
+				// A turn that started during the fade still owns the frames.
+				if (waveFrames === frames && runningSince() === null) {
+					frames();
+					waveFrames = undefined;
 				}
 				tui?.requestRender();
 			}, FADE_MS + FRAME_MS).unref();
@@ -1127,6 +1117,8 @@ export default function (pi: ExtensionAPI) {
 		stopFlash();
 		stopTaskFrames();
 		stopWakeFrames();
+		waveFrames = undefined;
+		animationClock.releaseAllFrames();
 		unframe?.();
 		unframe = undefined;
 	});

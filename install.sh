@@ -322,6 +322,11 @@ if ! $doctor_only; then
 	# The handoff footer names this script by absolute path; the model runs it
 	# from the bash tool, so it has to be executable and need nothing installed.
 	chmod +x "$KIT/bin/pi-recall.mjs"
+	# The chrome screen tests replay bytes through a real terminal emulator. It
+	# goes in test/node_modules, not the kit's own, because `npm install` in the
+	# kit prunes its peer links.
+	[[ -d "$KIT/test/node_modules/@xterm/headless" ]] ||
+		npm install --prefix "$KIT/test" --no-save --no-package-lock --silent @xterm/headless@6.0.0
 
 	say "running kit tests"
 	(cd "$KIT" && npm test >/dev/null) && say "kit tests pass"

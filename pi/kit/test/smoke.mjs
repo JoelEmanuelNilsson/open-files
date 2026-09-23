@@ -60,16 +60,31 @@ function makeApi() {
 	const commands = new Map();
 	const handlers = new Map();
 	const entries = [];
+	const listeners = new Set();
 	const api = {
 		registerTool: (t) => tools.set(t.name, t),
 		registerCommand: (n, o) => commands.set(n, o),
 		registerEntryRenderer: () => {},
 		registerShortcut: () => {},
 		appendEntry: (type, data) => entries.push({ type: "custom", customType: type, data }),
-		on: (e, h) => handlers.set(e, h),
+		// pi runs every handler an extension registers; its session scope registers first.
+		on: (e, h) => {
+			const prev = handlers.get(e);
+			handlers.set(e, prev ? (event, c) => (prev(event, c), h(event, c)) : h);
+		},
 		getThinkingLevel: () => "off",
 		sendUserMessage: () => {},
-		events: { on: () => {}, emit: () => {} },
+		// A live bus: the session scope closes through it at shutdown.
+		events: {
+			on: (channel, fn) => {
+				const listener = { channel, fn };
+				listeners.add(listener);
+				return () => listeners.delete(listener);
+			},
+			emit: (channel, data) => {
+				for (const l of [...listeners]) if (l.channel === channel) l.fn(data);
+			},
+		},
 	};
 	return { api, tools, commands, handlers, entries };
 }
@@ -456,7 +471,7 @@ console.log("session-mode");
 	for (const answer of [undefined, false, true]) {
 		const parent = await boot({ hasUI: true, workflows: answer });
 		const file = parent.persisted.map(({ type, data }) => ({ type: "custom", customType: type, data }));
-		const carried = carriedEntries(file, parent.sessionId, "child").map(({ customType, data }) => ({ type: "custom", customType, data }));
+		const carried = carriedEntries(file, parent.sessionId, "child", new Set()).map(({ customType, data }) => ({ type: "custom", customType, data }));
 		const child = await boot({ reason: "new", hasUI: true, entries: carried });
 		check(`a handoff continuation of a seat that answered ${answer === undefined ? "escape" : answer ? "yes" : "no"} is not asked again`, child.asked.length === 0, JSON.stringify(child.asked));
 		check("and carries the same answer", child.workflows === (answer === true));
@@ -643,6 +658,7 @@ console.log("session-mode");
 			const resolve = auth ?? (() => ({ ok: true, apiKey: "sk-ant-oat01-fresh" }));
 			const c = {
 				hasUI,
+				isIdle: () => true,
 				cwd: process.cwd(),
 				mode: hasUI ? "tui" : "print",
 				sessionManager: { getEntries: () => entries, getSessionId: () => sessionId, getHeader: () => ({}) },
@@ -1951,6 +1967,7 @@ console.log("owned-prompt / claude-code / wire");
 	const handlers = new Map();
 	const commands = new Map();
 	wireMod.default({
+		events: { on: () => () => {}, emit: () => {} },
 		on: (e, h) => handlers.set(e, h),
 		registerCommand: (n, o) => commands.set(n, o),
 	});
@@ -2046,7 +2063,7 @@ console.log("owned-prompt / claude-code / wire");
 			},
 		};
 		const broken = new Map();
-		(await jiti.import(`${ROOT}/extensions/wire.ts?broken-instrument`)).default({ on: (e, h) => broken.set(e, h), registerCommand: () => {} });
+		(await jiti.import(`${ROOT}/extensions/wire.ts?broken-instrument`)).default({ events: { on: () => () => {}, emit: () => {} }, on: (e, h) => broken.set(e, h), registerCommand: () => {} });
 		broken.get("before_agent_start")({ systemPromptOptions: options }, brokenCtx);
 		const sent = broken.get("before_provider_request")({ payload }, brokenCtx);
 		check("an instrument that throws still sends the owned four blocks", sent?.system.length === 4 && sent.system[0].text.startsWith("x-anthropic-billing-header:") && sent.system[2].text === oauthOurs, JSON.stringify(sent?.system.map((b) => b.text.slice(0, 30))));
@@ -2114,7 +2131,7 @@ console.log("owned-prompt / claude-code / wire");
 	};
 	const subMod = await jiti.import(`${ROOT}/extensions/wire.ts?sub`);
 	const subHandlers = new Map();
-	subMod.default({ on: (e, h) => subHandlers.set(e, h), registerCommand: () => {} });
+	subMod.default({ events: { on: () => () => {}, emit: () => {} }, on: (e, h) => subHandlers.set(e, h), registerCommand: () => {} });
 	subHandlers.get("before_agent_start")({ systemPromptOptions: { ...options, customPrompt: "You are a subagent." } }, subCtx);
 	const subWire = subHandlers.get("before_provider_request")({ payload }, subCtx);
 	check("a subagent declares itself", attributionOf(subWire.system).includes(" cc_is_subagent=true;"));
@@ -2298,7 +2315,7 @@ console.log("prompt inheritance between sessions");
 	const boot = async (tag) => {
 		const handlers = new Map();
 		const mod = await jiti.import(`${ROOT}/extensions/wire.ts?${tag}`);
-		mod.default({ on: (e, h) => handlers.set(e, h), registerCommand: () => {} });
+		mod.default({ events: { on: () => () => {}, emit: () => {} }, on: (e, h) => handlers.set(e, h), registerCommand: () => {} });
 		return handlers;
 	};
 	const sessionCtx = (sessionId, header, cwd = dir) => ({
@@ -2594,13 +2611,16 @@ console.log("watchdog");
 			let aborts = 0;
 			const renderers = new Map();
 			const api = {
+				events: { on: () => () => {}, emit: () => {} },
 				on: (e, h) => handlers.set(e, h),
 				appendEntry: (type, data) => entries.push({ type, data }),
 				registerEntryRenderer: (type, render) => renderers.set(type, render),
 			};
 			let idle = false;
-			const c = { mode, isIdle: () => idle, abort: () => { aborts++; }, ui: { notify: (m, l) => notices.push([m, l]) } };
+			let branch = [];
+			const c = { mode, isIdle: () => idle, abort: () => { aborts++; }, ui: { notify: (m, l) => notices.push([m, l]) }, sessionManager: { getBranch: () => branch } };
 			const setIdle = (v) => { idle = v; };
+			const setBranch = (v) => { branch = v; };
 			const saved = { ...process.env };
 			Object.assign(process.env, env);
 			try {
@@ -2609,7 +2629,7 @@ console.log("watchdog");
 			} finally {
 				for (const k of Object.keys(env)) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
 			}
-			return { handlers, entries, notices, renderers, c, setIdle, aborts: () => aborts };
+			return { handlers, entries, notices, renderers, c, setIdle, setBranch, aborts: () => aborts };
 		};
 
 		const w = await wire("print", { PI_WATCHDOG_MS: "40" });
@@ -2673,6 +2693,35 @@ console.log("watchdog");
 		retried.handlers.get("tool_execution_start")({ toolCallId: "t", toolName: "grep" }, retried.c);
 		await new Promise((r) => setTimeout(r, 120));
 		check("a retried turn stays watched past agent_end", retried.aborts() === 1, String(retried.aborts()));
+
+		// A reload keeps the run going but starts none, so the new instance sees no agent_start for it.
+		const reloaded = await wire("print", { PI_WATCHDOG_MS: "40" });
+		reloaded.handlers.get("session_start")?.({ reason: "reload" }, reloaded.c);
+		await new Promise((r) => setTimeout(r, 120));
+		check("a run a reload lands in stays watched", reloaded.aborts() === 1, String(reloaded.aborts()));
+		// The tools running at the reload are read off the branch: a call written, its result not.
+		const message = (m) => ({ type: "message", message: m });
+		const midTool = (name) => [
+			message({ role: "assistant", content: [{ type: "toolCall", id: "old", name: "grep" }] }),
+			message({ role: "toolResult", toolCallId: "old" }),
+			message({ role: "assistant", content: [{ type: "toolCall", id: "done", name: "read" }, { type: "toolCall", id: "live", name }] }),
+			message({ role: "toolResult", toolCallId: "done" }),
+		];
+		const reloadedWaiting = await wire("print", { PI_WATCHDOG_MS: "40" });
+		reloadedWaiting.setBranch(midTool("bash"));
+		reloadedWaiting.handlers.get("session_start")?.({ reason: "reload" }, reloadedWaiting.c);
+		await new Promise((r) => setTimeout(r, 120));
+		check("a self-bounded tool running at the reload is still known, so its silence does not count", reloadedWaiting.aborts() === 0, String(reloadedWaiting.aborts()));
+		const reloadedHung = await wire("print", { PI_WATCHDOG_MS: "40" });
+		reloadedHung.setBranch(midTool("find"));
+		reloadedHung.handlers.get("session_start")?.({ reason: "reload" }, reloadedHung.c);
+		await new Promise((r) => setTimeout(r, 120));
+		check("and a hung one running at the reload is named in the abort", reloadedHung.aborts() === 1 && reloadedHung.entries.some((e) => e.data.text.includes("find")), JSON.stringify(reloadedHung.entries));
+		const reloadedIdle = await wire("print", { PI_WATCHDOG_MS: "40" });
+		reloadedIdle.setIdle(true);
+		reloadedIdle.handlers.get("session_start")?.({ reason: "reload" }, reloadedIdle.c);
+		await new Promise((r) => setTimeout(r, 120));
+		check("and an idle reload arms nothing", reloadedIdle.aborts() === 0 && reloadedIdle.entries.length === 0, JSON.stringify(reloadedIdle.entries));
 
 		// Belt and braces for a settle event that never arrives: isIdle() is the
 		// real bit, so a quietly-finished run is disarmed, not aborted.

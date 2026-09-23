@@ -38,6 +38,7 @@ eq("more than one content row unfolds it", isPromptFolded({ ...idle, contentRows
 console.log("fold: one row, or two, filled in priority order");
 const dash = (text) => `\x1b[90m${text}\x1b[0m`;
 const labels = {
+	side: [],
 	path: [{ text: "~/dotfiles", paint: (t) => `\x1b[34m${t}\x1b[0m` }],
 	session: [],
 	branch: [{ text: "main", paint: (t) => `\x1b[34m${t}\x1b[0m` }],

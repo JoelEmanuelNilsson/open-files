@@ -231,6 +231,13 @@ try {
 		const timedOut = await sendPing(targetWith(), 300);
 		check("a ping nobody answers is a timeout", !timedOut.ok && timedOut.reason === "timeout", JSON.stringify(timedOut));
 
+		// A session that ends mid-ping ends the ping, not its 10s timeout.
+		const session = new AbortController();
+		const ending = sendPing(targetWith(), 10_000, session.signal);
+		setTimeout(() => session.abort(), 50);
+		const ended = await ending;
+		check("a ping whose session ends stops with it, cancelled rather than failed", !ended.ok && ended.reason === "cancelled" && ended.ms < 1_000, JSON.stringify(ended));
+
 		// A refused connection has no status to parse, which is the branch that
 		// separates "the provider said no" from "nobody was there".
 		const nowhere = await sendPing(targetWith({ model: { ...model, baseUrl: "http://127.0.0.1:1" } }), 5_000);

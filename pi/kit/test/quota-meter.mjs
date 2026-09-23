@@ -194,6 +194,7 @@ console.log("\nwire: the meter reads the response the harness already had");
 	const handlers = new Map();
 	const commands = new Map();
 	wireMod.default({
+		events: { on: () => () => {}, emit: () => {} },
 		on: (event, handler) => handlers.set(event, handler),
 		registerCommand: (name, command) => commands.set(name, command),
 	});

@@ -274,6 +274,7 @@ const loaderApi = {
 	registerShortcut: () => {},
 	registerMessageRenderer: () => {},
 	on: () => {},
+	events: { on: () => () => {}, emit: () => {} },
 };
 await (await jiti.import(`${ROOT}/extensions/transcript/index.ts`, { default: true }))(loaderApi);
 // bash is registered by its own extension, wearing the transcript's receipt.

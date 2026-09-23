@@ -120,6 +120,7 @@ async function runtime(entries = []) {
 
 	const ctx = {
 		mode: "tui",
+		isIdle: () => true,
 		hasUI: true,
 		cwd: ROOT,
 		model: { id: "claude-opus-5", provider: "anthropic", reasoning: true },

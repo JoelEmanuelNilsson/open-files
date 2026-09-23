@@ -133,7 +133,7 @@ console.log("\nmodel-catalog: the assertion on the wire");
 	// wire invariant from a request that goes out anyway.
 	const wire = await jiti.import(`${ROOT}/extensions/wire.ts?catalog`);
 	const handlers = new Map();
-	wire.default({ on: (event, handler) => handlers.set(event, handler), registerCommand: () => {} });
+	wire.default({ events: { on: () => () => {}, emit: () => {} }, on: (event, handler) => handlers.set(event, handler), registerCommand: () => {} });
 
 	const REPO = path.join(os.homedir(), "dotfiles");
 	const model = { id: "claude-opus-5", provider: "anthropic", api: "anthropic-messages", baseUrl: "https://api.anthropic.com" };

@@ -30,8 +30,9 @@ const SEAM = "__piKitPingTargets";
  *
  * `timeout` is the network rather than a verdict, so the keepalive chain waits
  * it out instead of abandoning an entry that is probably still there.
+ * `cancelled` is the caller's session ending mid-ping: no verdict either.
  */
-export type PingFailure = "auth" | "status" | "timeout" | "network";
+export type PingFailure = "auth" | "status" | "timeout" | "network" | "cancelled";
 
 /** What one ping did, for the wire trace and for the caller's next decision. */
 export type PingResult =
@@ -141,14 +142,21 @@ export function pingHeaders(captured: ProviderHeaders, resolved: ProviderHeaders
  * is a caller decision, so all of them are values. The stream is aborted at the
  * first content event, which is the cost control rather than an error path.
  */
-export async function sendPing(target: PingTarget, timeoutMs: number): Promise<PingResult> {
+export async function sendPing(target: PingTarget, timeoutMs: number, signal?: AbortSignal): Promise<PingResult> {
 	const controller = new AbortController();
 	const timeout = setTimeout(() => controller.abort(), timeoutMs);
 	timeout.unref?.();
+	// The caller's session ending ends the ping, so its timer never outlives that session.
+	const end = () => controller.abort();
+	signal?.addEventListener("abort", end, { once: true });
 	const startedAt = Date.now();
 	const since = (): number => Date.now() - startedAt;
-	const timedOut = (): PingResult => ({ ok: false, ms: since(), reason: "timeout", detail: `no response in ${timeoutMs}ms` });
+	const cutShort = (): PingResult =>
+		signal?.aborted
+			? { ok: false, ms: since(), reason: "cancelled", detail: "the session ended" }
+			: { ok: false, ms: since(), reason: "timeout", detail: `no response in ${timeoutMs}ms` };
 	try {
+		if (signal?.aborted) return cutShort();
 		// Resolved per ping, never captured: this is what refreshes an OAuth token
 		// that aged out while the session sat idle.
 		const auth = await target.registry.getApiKeyAndHeaders(target.model);
@@ -173,9 +181,9 @@ export async function sendPing(target: PingTarget, timeoutMs: number): Promise<P
 		});
 		for await (const event of stream) {
 			if (event.type === "error") {
-				// Our own signal carries the timeout and nothing else: the success path
+				// Our own signal carries the timeout and the session's end: the success path
 				// aborts only after it has its answer, and returns before looking here.
-				return controller.signal.aborted ? timedOut() : failureOf(event.error.errorMessage, since());
+				return controller.signal.aborted ? cutShort() : failureOf(event.error.errorMessage, since());
 			}
 			// pi-ai folds `message_start` in before the first content event, so the
 			// event after `start` is the first one that knows what the ping cost.
@@ -194,10 +202,11 @@ export async function sendPing(target: PingTarget, timeoutMs: number): Promise<P
 		}
 		return { ok: false, ms: since(), reason: "network", detail: "the provider streamed nothing" };
 	} catch (error) {
-		if (controller.signal.aborted) return timedOut();
+		if (controller.signal.aborted) return cutShort();
 		return { ok: false, ms: since(), reason: "network", detail: oneLine(error instanceof Error ? error.message : String(error)) };
 	} finally {
 		clearTimeout(timeout);
+		signal?.removeEventListener("abort", end);
 	}
 }
 

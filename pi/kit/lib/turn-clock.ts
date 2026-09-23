@@ -5,7 +5,7 @@
  * `notify` reads it for the duration in its desktop ping. They meet on
  * `globalThis` because pi's extension loader builds a fresh jiti instance per
  * extension with module caching disabled, so a module-level variable is never
- * shared between two of them — the same reason `cache-window` and `side-flag`
+ * shared between two of them — the same reason `cache-window` and `side-mode`
  * live there.
  *
  * They meet on this file for the rules, because two extensions with two
@@ -166,15 +166,13 @@ export function advanceTurnClock(event: TurnEvent, now: number): TurnClock {
 /**
  * Whether this session may write the clock.
  *
- * pi runs subagents in-process and `/btw` opens a side thread the same way, and
- * each loads its own copy of this kit onto the same `globalThis`. They raise
+ * pi runs subagents in-process, and each loads its own copy of this kit onto
+ * the same `globalThis`. They raise
  * the full lifecycle at their own handlers, so without a gate a background
  * agent's turn would overwrite the number in front of the user.
  *
  * The gate is the signal the chrome already uses to decide whether it owns the
- * frame: the session whose mode is `tui`. Not `isSideSession`, which is true
- * only while a side session is being *created* and would miss a subagent
- * entirely.
+ * frame: the session whose mode is `tui`.
  *
  * The limit that buys: a subagent is indistinguishable from a top-level `print`
  * session by mode alone, so a headless run publishes nothing and readers see an

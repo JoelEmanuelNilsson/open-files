@@ -33,7 +33,7 @@ console.log("cells: a painted line splits into glyphs and rebuilds unchanged");
 	const line = "\x1b[38;2;1;2;3ma\x1b[1mb\x1b[0mc";
 	const cells = toCells(line);
 	eq("every code point is one cell, in order", cells.map((cell) => cell.ch).join(""), "abc");
-	eq("styles accumulate until a reset clears them", cells.map((cell) => cell.sgr), ["\x1b[38;2;1;2;3m", "\x1b[38;2;1;2;3m\x1b[1m", ""]);
+	eq("styles hold until a reset clears them", cells.map((cell) => cell.sgr), ["\x1b[38;2;1;2;3m", "\x1b[1m\x1b[38;2;1;2;3m", ""]);
 	eq("the rebuild carries the same glyphs", toCells(fromCells(cells)).map((cell) => cell.ch).join(""), "abc");
 	eq("and the same styles", toCells(fromCells(cells)).map((cell) => cell.sgr), cells.map((cell) => cell.sgr));
 	eq("the line ends reset", fromCells(cells).endsWith("\x1b[0m"), true);
@@ -212,6 +212,43 @@ console.log("\nlabels: a label-length strip takes the label light, not a row's")
 	eq("the label light puts lamps and gaps on nine cells", range(LABEL_LIGHT) > 2, true);
 	eq("a row's light would light all nine at once", range(ROW_LIGHT) < 1.3, true);
 	eq("and the label still reads as itself", shadeLine(label, 0.4, "self", { light: LABEL_LIGHT }).replace(/\x1b\[[0-9;]*m/g, ""), "2 tasks \u2193");
+}
+
+console.log("\npastel: bright text under the light never shows white between lamps");
+{
+	const { CALL_LIGHT, FOLDED_BAR_LIGHT, ROW_LIGHT, shadeLine } = await jiti.import(`${ROOT}/extensions/zen-chrome/prism.ts`);
+	// A tool row's cream, and the folded bar's rule and model in the terminal's
+	// white slot, are the brightest text on screen: left at their own colour
+	// between pools they read as white bands travelling along the row.
+	const CREAM = { r: 246, g: 221, b: 209 };
+	const WHITE_SLOT = { r: 197, g: 200, b: 198 };
+	const paint = (c, text) => `\x1b[38;2;${c.r};${c.g};${c.b}m${text}\x1b[0m`;
+	const toolRow = paint(CREAM, "Running 1 shell command ".repeat(3));
+	const barRow = `${paint(WHITE_SLOT, "\u2576\u2500 ")}${paint({ r: 129, g: 162, b: 190 }, "~/dotfiles")}${paint(WHITE_SLOT, " \u2500 opus \u2500 47s \u2500".padEnd(40, "\u2500"))}`;
+	const colours = (row, light, t) =>
+		toCells(shadeLine(row, t, "self", { light })).flatMap((cell) => {
+			const last = [...cell.sgr.matchAll(/\x1b\[38;2;(\d+);(\d+);(\d+)m/g)].pop();
+			return cell.ch.trim() === "" || last === undefined ? [] : [{ r: Number(last[1]), g: Number(last[2]), b: Number(last[3]) }];
+		});
+	const over = (row, light) => Array.from({ length: 130 }, (_, i) => i / 5).flatMap((t) => colours(row, light, t));
+	const chroma = (c) => (Math.max(c.r, c.g, c.b) - Math.min(c.r, c.g, c.b)) / Math.max(c.r, c.g, c.b);
+	// Chroma 0.15 is the cream itself; the pastel rests near 0.4.
+	eq("a lit tool row never goes pale", Math.min(...over(toolRow, CALL_LIGHT).map(chroma)) > 0.3, true);
+	eq("nor does the folded bar, rule and model included", Math.min(...over(barRow, FOLDED_BAR_LIGHT).map(chroma)) > 0.3, true);
+	eq("where a task row, resting at its own colour, would", Math.min(...over(barRow, ROW_LIGHT).map(chroma)) < 0.1, true);
+	// OKLab lightness. At one HSV value the gold and green end of the arc is 0.15 to
+	// 0.2 above the violet end, so a tint sweeping into yellow flared.
+	const lin = (u) => ((u /= 255) <= 0.04045 ? u / 12.92 : ((u + 0.055) / 1.055) ** 2.4);
+	const lightness = (c) => {
+		const [r, g, b] = [c.r, c.g, c.b].map(lin);
+		const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+		const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+		const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+		return 0.2104542553 * l + 0.793617785 * m - 0.0040720718 * s;
+	};
+	const levels = over(toolRow, CALL_LIGHT).map(lightness);
+	eq("and holds one lightness as it passes through yellow", Math.max(...levels) - Math.min(...levels) < 0.08, true);
+	eq("and the row still reads as itself", shadeLine(toolRow, 1, "self", { light: CALL_LIGHT }).replace(/\x1b\[[0-9;]*m/g, ""), "Running 1 shell command ".repeat(3));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

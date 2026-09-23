@@ -196,6 +196,7 @@ console.log("\nextensions/continue-session.ts: the handoff carry reaches the suc
 			registerMessageRenderer: () => {},
 			sendMessage: () => {},
 			sendUserMessage: () => {},
+			events: { on: () => () => {}, emit: () => {} },
 			appendEntry: (customType, data) => said.entries.push({ customType, data }),
 			setModel: async (model) => { said.models.push(model); return true; },
 			setThinkingLevel: (level) => said.thinking.push(level),

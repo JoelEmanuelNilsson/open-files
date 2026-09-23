@@ -112,6 +112,7 @@ function folded(total: number, opts: BoxOptions & { agentElapsed?: string }): st
 	return foldRows(
 		total,
 		{
+			side: [],
 			path: cwdPieces(opts.cwd),
 			session: sessionName(opts.name),
 			branch: labels.branch,

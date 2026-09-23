@@ -116,6 +116,10 @@
  * bytes that wrote it, pi chains `before_provider_request` and takes the last
  * return value, and the last return value is this one. `session-mode` decides
  * when to ping; it may not decide what the request was.
+ *
+ * A side seat (`lib/side-seat.ts`, `/btw`) sends main's last request with only
+ * its messages replaced, under main's session id; it is built here so `system`
+ * and the headers keep one owner.
  */
 
 import { chmodSync, writeFileSync } from "node:fs";
@@ -139,11 +143,13 @@ import { accounted, readCacheWindow, readRenewal, SHORT_TTL_MS, ttlFromPayload }
 import { forgetOwnedPrompt, inheritedSessionPrompt, ownedSessionPrompt, type SessionLineage } from "../lib/inherited-prompt.ts";
 import { commandLineModelSpec, familyOf } from "../lib/model-family.ts";
 import { claimScreen, notice, noticeOnce, noticeSinkDir } from "../lib/notice.ts";
+import { createSessionScope } from "../lib/session-scope.ts";
 import { buildChatSystemPrompt, codexInstructions, cwdBlockText, PROMPT_UNAVAILABLE, validatePromptOptions, type WireToolName } from "../lib/owned-prompt.ts";
 import { forgetPingTarget, publishPingTarget } from "../lib/ping.ts";
 import { capturedPromptOptions, capturePromptOptions, forgetPromptOptions } from "../lib/prompt-capture.ts";
 import { type CodexQuotaReading, codexQuotaReport, type QuotaReading, quotaReport, readCodexQuotaHeaders, readQuotaHeaders } from "../lib/quota-meter.ts";
 import { childSeatOf, isChatSeat, isChildSeat, toolSeatOf } from "../lib/seat.ts";
+import { buildSideRequest, readSideRequestBasis } from "../lib/side-seat.ts";
 import { ensurePrivateDir } from "../lib/state-dir.ts";
 import { applyChatToolPolicy, applyToolPolicy, canonicalToolOrder } from "../lib/tool-policy.ts";
 import { inputsKey, inputsParts, measuresReasoning, predictWarmth, type PrefixKey, prefixInputsOf, pruneWarmPrefixes, recordPrediction, recordReasoningFact, recordWarmPrefix, type Warmth, warmPrefixDir, wireKey } from "../lib/warm-prefix.ts";
@@ -175,6 +181,7 @@ const CODEX_QUOTA_UNREPORTED = "Codex quota: not reported over WebSocket (pi-ai 
 const CHAT_SEAT = isChatSeat();
 
 export default function wire(pi: ExtensionAPI) {
+	const scope = createSessionScope(pi);
 	let reportedProblems = "";
 	let promptId = newPromptId();
 	let previousRequestId: string | undefined;
@@ -234,7 +241,6 @@ export default function wire(pi: ExtensionAPI) {
 	 * the one it filled.
 	 */
 	let filedFor: string | undefined;
-	let releaseScreen: (() => void) | undefined;
 	/**
 	 * What the warm-prefix ledger promised for this seat's first request, held
 	 * until that request's usage arrives and can confirm or refute it. Consumed
@@ -258,8 +264,8 @@ export default function wire(pi: ExtensionAPI) {
 		firstRequestSent = false;
 		pendingMeasurement = undefined;
 		if (!ctx.hasUI) return;
-		releaseScreen?.();
-		releaseScreen = claimScreen((message, level) => ctx.ui.notify(message, level));
+		// Released as the session ends: a child's notice after that goes to the notice file.
+		scope.signal.addEventListener("abort", claimScreen((message, level) => ctx.ui.notify(message, level)), { once: true });
 		pruneWarmPrefixes(warmPrefixDir());
 	});
 
@@ -302,7 +308,7 @@ export default function wire(pi: ExtensionAPI) {
 		// A degraded prompt or an engine child's inherited one are not what these
 		// inputs produce on a seat of their own; recording them would teach the
 		// ledger a mapping that holds for nobody.
-		if (inputsHash !== undefined && !degraded && childSeatOf(sessionId) === undefined) {
+		if (inputsHash !== undefined && !degraded && childSeatOf(sessionId) === undefined && readSideRequestBasis(sessionId) === undefined) {
 			const { contradiction } = recordPrediction(dir, inputsHash, key);
 			if (contradiction !== undefined) {
 				noticeOnce(
@@ -328,6 +334,8 @@ export default function wire(pi: ExtensionAPI) {
 	 * module exists to prevent.
 	 */
 	const subagentOf = (ctx: ExtensionContext): SubagentIdentity | undefined => {
+		// A side seat speaks as main: its requests are main's, re-sent with other messages.
+		if (readSideRequestBasis(ctx.sessionManager.getSessionId()) !== undefined) return undefined;
 		if (!isChildSeat(optionsOf(ctx), process.argv, ctx.sessionManager.getSessionId())) return undefined;
 		const { sessionId, parentSessionId } = lineageOf(ctx);
 		return subagentIdentity(sessionId, parentSessionId);
@@ -360,8 +368,11 @@ export default function wire(pi: ExtensionAPI) {
 		return { model, oauth: registry.isUsingOAuth(model), registry };
 	};
 
-	const claudeCodeHeadersFor = (ctx: ExtensionContext): Record<string, string> =>
-		claudeCodeHeaders({ sessionId: ctx.sessionManager.getSessionId(), subagent: subagentOf(ctx) });
+	const claudeCodeHeadersFor = (ctx: ExtensionContext): Record<string, string> => {
+		const side = readSideRequestBasis(ctx.sessionManager.getSessionId());
+		if (side !== undefined) return claudeCodeHeaders({ sessionId: side.mainSessionId });
+		return claudeCodeHeaders({ sessionId: ctx.sessionManager.getSessionId(), subagent: subagentOf(ctx) });
+	};
 
 	/**
 	 * The model spec this process was launched for: `--model` when a launcher named
@@ -569,7 +580,16 @@ export default function wire(pi: ExtensionAPI) {
 		const sessionId = ctx.sessionManager.getSessionId();
 		filedFor = sessionId;
 
-		const next = { ...payload, system, ...(tools ? { tools } : {}) };
+		// A side seat (lib/side-seat.ts) re-sends main's last request with only its
+		// messages replaced, so it reads main's cached prefix; without one it goes cold.
+		const sideBasis = readSideRequestBasis(sessionId);
+		const sideMain = sideBasis?.mainPayload !== undefined && sideBasis.mainPayload.model === payload.model ? sideBasis.mainPayload : undefined;
+		const side = sideMain === undefined ? undefined : buildSideRequest(sideMain, payload);
+		if (side !== undefined && !side.prefixMatched) {
+			noticeOnce(ctx, "wire:side-prefix", "side request: main prefix differs from last main request; side reads cold", "info");
+		}
+		const next = side?.payload ?? { ...payload, system, ...(tools ? { tools } : {}) };
+		const sentSystem = side !== undefined && Array.isArray(next.system) ? next.system.filter(isTextBlock) : system;
 
 		// Everything past this line is instrumentation, and none of it may cost the
 		// request: pi catches a handler's throw and sends the payload it already had
@@ -587,10 +607,10 @@ export default function wire(pi: ExtensionAPI) {
 				model: typeof payload.model === "string" ? payload.model : model.id,
 				oauth,
 				degraded,
-				system,
+				system: sentSystem,
 				headers: oauth ? claudeCodeHeadersFor(ctx) : {},
-				tools: tools ?? payload.tools,
-				messages: payload.messages,
+				tools: side === undefined ? (tools ?? payload.tools) : next.tools,
+				messages: next.messages,
 				payload: next,
 			});
 
@@ -609,6 +629,8 @@ export default function wire(pi: ExtensionAPI) {
 			// request has not gone out, and the ledger knows what the provider was holding.
 			const rewrite = trace.takeRewrite();
 			if (rewrite !== undefined) notice(ctx, `wire: ${rewrite}`, "warning");
+			// The side is not kept warm: main's own ping already renews the prefix it reads.
+			if (sideBasis !== undefined) return;
 			// Published from here and nowhere else: this is the object the provider gets,
 			// `stream: true` and all, so a replay of it is a cache read rather
 			// than a second full-price write of a prefix nobody asked for. The trace
@@ -651,6 +673,7 @@ export default function wire(pi: ExtensionAPI) {
 		const report = trace?.usage(message.usage, quota);
 		if (report === undefined) return;
 		lastBreak = report;
+		if (readSideRequestBasis(ctx.sessionManager.getSessionId()) !== undefined) return;
 		notice(ctx, `wire: ${describeBreak(report)}`, "warning");
 	});
 
@@ -726,8 +749,6 @@ export default function wire(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", (event, ctx) => {
-		releaseScreen?.();
-		releaseScreen = undefined;
 		const ending = filedFor ?? ctx.sessionManager.getSessionId();
 		forgetOwnedPrompt(ending);
 		// Same reasoning as the ping target below: a reload is not an ending, and a

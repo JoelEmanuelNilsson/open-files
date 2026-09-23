@@ -105,7 +105,7 @@ console.log("\nchat: the wire is the invariant alone");
 		try {
 			const mod = await jiti.import(`${ROOT}/extensions/wire.ts?${tag}`);
 			const handlers = new Map();
-			mod.default({ on: (e, h) => handlers.set(e, h), registerCommand: () => {} });
+			mod.default({ events: { on: () => () => {}, emit: () => {} }, on: (e, h) => handlers.set(e, h), registerCommand: () => {} });
 			const c = ctx(oauth, `550e8400-e29b-41d4-a716-4466554400${String(++seats).padStart(2, "0")}`);
 			if (capture) handlers.get("before_agent_start")({ systemPromptOptions: options }, c);
 			return handlers.get("before_provider_request")({ payload: payload() }, c);

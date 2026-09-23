@@ -37,15 +37,12 @@
 
 import { execFile } from "node:child_process";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { isSideSession } from "../lib/side-flag.ts";
 import { ownsTurnClock } from "../lib/turn-clock.ts";
 
 /** Absolute: pi may be started from a launchd context with no Homebrew PATH. */
 const SKETCHYBAR = process.env.PI_BAR_LIGHT_BIN ?? "/opt/homebrew/bin/sketchybar";
 
 export default function (pi: ExtensionAPI) {
-	// A subagent finishing is not the agent handing the turn back to you.
-	if (isSideSession()) return;
 	if (process.env.PI_BAR_LIGHT === "off") return;
 
 	pi.on("agent_settled", (_event, ctx) => {

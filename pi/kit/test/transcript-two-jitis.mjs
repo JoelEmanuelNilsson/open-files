@@ -53,6 +53,7 @@ const api = {
 	registerShortcut: () => {},
 	registerMessageRenderer: () => {},
 	sendMessage: () => {},
+	events: { on: () => () => {}, emit: () => {} },
 	on: (name, fn) => {
 		const list = handlers.get(name) ?? [];
 		list.push(fn);

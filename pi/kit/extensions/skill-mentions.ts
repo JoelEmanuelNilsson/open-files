@@ -47,7 +47,7 @@ import {
 	type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { Container, fuzzyFilter, type AutocompleteItem, type AutocompleteProvider, type Component } from "@earendil-works/pi-tui";
-import { isSideSession } from "../lib/side-flag.ts";
+import { sideModeClaimsInput } from "../lib/side-mode.ts";
 import { CallHeader, headerPaints } from "./transcript/header.ts";
 import { ResultRow, resultPaints } from "./transcript/result.ts";
 import { transcriptEnabled } from "./transcript/row.ts";
@@ -206,8 +206,6 @@ function mentionProvider(current: AutocompleteProvider, skills: () => SkillRef[]
 }
 
 export default function (pi: ExtensionAPI) {
-	if (isSideSession()) return;
-
 	/** sessionId -> SKILL.md paths already injected on the current branch. */
 	const loaded = new Map<string, Set<string>>();
 	const branch = (ctx: ExtensionContext) => {
@@ -249,6 +247,8 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("input", (event, ctx) => {
 		if (event.source === "extension") return;
+		// A side-mode submit goes to the side thread; loading a skill here would put it in main.
+		if (sideModeClaimsInput(ctx.sessionManager.getSessionId(), event)) return;
 		// `input` runs before /skill: and /template expansion; prepending anything
 		// to a command would break the expander's startsWith check.
 		if (event.text.startsWith("/")) return;

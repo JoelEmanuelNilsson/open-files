@@ -16,6 +16,7 @@ import "./env.mjs";
 import { TEST_FILES } from "./files.mjs";
 import { createJiti } from "/Users/joel/.nvm/versions/node/v26.2.0/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.mjs";
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 
@@ -196,32 +197,69 @@ console.log("\nthe two releases this repo still types out by hand");
 // ---------------------------------------------------------------------------
 console.log("\nthe turns that start without a user message");
 {
-	// pi hands out the prompt options on `before_agent_start`, and that fires on
-	// the user path alone. A turn started with `sendMessage(..., triggerTurn:
-	// true)` gets none, so on the first turn of a process `wire` has nothing to
-	// build a prompt from and refuses the turn rather than borrowing pi's prose
-	// (2026-09-06, req_011CenGzjBfwouGRX52Q5PE3). A command handler is the one
-	// context pi gives `getSystemPromptOptions()` to, so a command that starts a
-	// turn can and must prime the seat first. This roster is how the next author
-	// of one is made to read that sentence: adding a trigger fails here.
-	const sources = fs.readdirSync(path.join(ROOT, "extensions"), { recursive: true, withFileTypes: true })
-		.filter((entry) => entry.isFile() && entry.name.endsWith(".ts"))
-		.map((entry) => path.relative(path.join(ROOT, "extensions"), path.join(entry.parentPath, entry.name)))
-		.sort();
-	const triggers = sources.filter((file) => fs.readFileSync(path.join(ROOT, "extensions", file), "utf8").includes("triggerTurn: true"));
-	check(
-		"three extensions start a turn on their own, and no others",
-		triggers.join(",") === "agent-engine.ts,bash.ts,continue-session.ts",
-		triggers.join(","),
-	);
+	// pi hands out the prompt options on `before_agent_start`, and a turn started
+	// by a custom message skips it: on the first turn of a process `wire` had
+	// nothing to build a prompt from (2026-09-06, req_011CenGzjBfwouGRX52Q5PE3),
+	// and on 2026-09-23 such a turn raced a handoff's continuation. Only the
+	// session scope, which knows whether that event has fired, may ask for one.
+	const scopeFile = path.join(ROOT, "lib", "session-scope.ts");
+	// pi's own esbuild lexes the source, so a regex literal like /^https?:\/\// opens no
+	// comment and a type-only mention is erased; strings stay, so a quoted key still counts.
+	const { transformSync } = createRequire(`${PI}/package.json`)("esbuild");
+	const triggerTurnsIn = (source, loader = "ts") => {
+		const code = transformSync(source, { loader, legalComments: "none" }).code;
+		return [...code.matchAll(/\btriggerTurn\b(?!["']?\s*:\s*false\b)/g)].map((match) => code.slice(code.lastIndexOf("\n", match.index) + 1, code.indexOf("\n", match.index)).trim());
+	};
+	check("the scan sees past a regex literal that holds `//`", triggerTurnsIn("const url = /^https?:\\/\\//; pi.sendMessage(m, { triggerTurn: true });").length === 1);
+	check("and ignores comments and `triggerTurn: false`", triggerTurnsIn("// triggerTurn: true\n/* triggerTurn: true */\npi.sendMessage(m, { triggerTurn: false });").length === 0);
+	const offenders = [];
+	for (const dir of ["extensions", "lib"]) {
+		for (const entry of fs.readdirSync(path.join(ROOT, dir), { recursive: true, withFileTypes: true })) {
+			const file = path.join(entry.parentPath, entry.name);
+			if (!entry.isFile() || !/\.tsx?$/.test(file) || file === scopeFile) continue;
+			for (const line of triggerTurnsIn(fs.readFileSync(file, "utf8"), file.endsWith(".tsx") ? "tsx" : "ts")) offenders.push(`${path.relative(ROOT, file)}: ${line}`);
+		}
+	}
+	check("no triggerTurn other than false outside lib/session-scope.ts", offenders.length === 0, offenders.join(", "));
 
-	const handoff = fs.readFileSync(path.join(ROOT, "extensions", "continue-session.ts"), "utf8");
-	const primed = handoff.indexOf("capturePromptOptions(ctx.sessionManager.getSessionId(), ctx.getSystemPromptOptions())");
-	const gate = handoff.indexOf('nudgeText("gated"');
-	check("the one that runs inside a command primes the seat before it triggers", primed > 0 && gate > primed, `primed at ${primed}, triggers at ${gate}`);
-	// The other two fire from event handlers, which pi gives no accessor: they can
-	// only be reached mid-session, where a capture already exists. If that stops
-	// being true, the refusal is what says so — loudly, on the request itself.
+	// A timer outlives the session that armed it: on 2026-09-23 the watchdog's
+	// fired into a reloaded seat, and a queued `/continue` into a quit one. The
+	// session scope clears its timers at shutdown, so a raw one needs a reason
+	// here, and each file's count is exact so a new one needs its own.
+	const RAW_TIMERS = {
+		"lib/session-scope.ts": { count: 3, why: "the scope's own timers, cleared when it closes, and quit's settle bound, cleared when it resolves" },
+		"lib/agent-runtime-handover.ts": { count: 1, why: "the handover deadline outlives the parking session by design; a claim or the deadline ends it" },
+		"lib/agent-runtime.ts": { count: 4, why: "the runtime lives on its SeatLink, not one session's scope, and is retired at shutdown" },
+		"lib/agent-wait.ts": { count: 1, why: "the runtime's wait clock: a wait is part of an `Agent` tool call and ends with that call's abort signal" },
+		"lib/ping.ts": { count: 1, why: "bounds one network call; cleared in its finally, and the call ends with its caller's session signal" },
+		"extensions/herdr-agent-state.ts": { count: 1, why: "vendored: herdr's reinstall overwrites edits; bounds one socket request to herdr and holds no pi or ctx" },
+		"extensions/bash.ts": { count: 2, why: "the exit grace closes a killed run's pipes and log, the orphan poll kills its leftover process group: both must finish after the session ends, and `settled` drops the run before any pi call" },
+		"lib/slot-colors.ts": { count: 1, why: "a TUI component timer: the terminal's colour reply timeout" },
+		"extensions/agent-dock/modal-repaint.ts": { count: 1, why: "a TUI component timer: an open overlay's frames" },
+		"extensions/transcript/group.ts": { count: 1, why: "a TUI component timer: row clocks, redrawn through their components" },
+		"extensions/transcript/row.ts": { count: 1, why: "a TUI component timer: a row's hint hold" },
+		"extensions/zen-chrome/animation-clock.ts": { count: 1, why: "a TUI component timer: the chrome's shared frame clock. It landed on main after the scope sweep, pending its move onto the scope" },
+		"extensions/zen-chrome/index.ts": { count: 6, why: "the chrome's fade and ticker timers, back from main's animation-clock rewrite after the scope sweep, pending their move onto the scope" },
+		"extensions/zen-chrome/test.ts": { count: 1, why: "the chrome's preview script, run by test.sh; pi never loads it" },
+		"extensions/workflow.ts": { count: 1, why: "workflow runs carry across a handoff via the runtime's link, pending the workflow-carry follow-up" },
+		"lib/workflow-prefix-stagger.ts": { count: 1, why: "workflow runs carry across a handoff via the runtime's link, pending the workflow-carry follow-up" },
+		"lib/workflow-sandbox.ts": { count: 6, why: "one host timer per script timer, cleared when the run ends; the host's `case \"setTimeout\":` counts too, and the other four are the script realm's own source text. Workflow runs carry across a handoff via the runtime's link, pending the workflow-carry follow-up" },
+	};
+	const rawTimersIn = (source, loader = "ts") => transformSync(source, { loader, legalComments: "none" }).code.match(/(?:(?<![\w$.])|(?<=\bglobalThis\.))set(?:Timeout|Interval)\b(?!\s*:)/g)?.length ?? 0;
+	check("the timer scan counts a call or a reference, and not a method, a key, a type or a comment", rawTimersIn("setTimeout(f, 1); globalThis.setInterval(f, 1); run(setTimeout); scope.setTimeout(f); const clock = { setTimeout: (f) => f }; let t: ReturnType<typeof setTimeout>; // setTimeout(f)") === 3);
+	const counted = {};
+	for (const dir of ["extensions", "lib"]) {
+		for (const entry of fs.readdirSync(path.join(ROOT, dir), { recursive: true, withFileTypes: true })) {
+			const file = path.join(entry.parentPath, entry.name);
+			if (!entry.isFile() || !/\.tsx?$/.test(file)) continue;
+			const count = rawTimersIn(fs.readFileSync(file, "utf8"), file.endsWith(".tsx") ? "tsx" : "ts");
+			if (count > 0) counted[path.relative(ROOT, file)] = count;
+		}
+	}
+	const unexplained = Object.entries(counted).filter(([file, count]) => RAW_TIMERS[file]?.count !== count).map(([file, count]) => `${file}: ${count} (allowed ${RAW_TIMERS[file]?.count ?? 0})`);
+	check("no raw setTimeout/setInterval outside the session scope but the allowlisted", unexplained.length === 0, unexplained.join(", "));
+	const gone = Object.keys(RAW_TIMERS).filter((file) => counted[file] === undefined);
+	check("and every allowlist entry still names a timer", gone.length === 0, gone.join(", "));
 }
 
 // ---------------------------------------------------------------------------

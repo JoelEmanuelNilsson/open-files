@@ -29,6 +29,8 @@ export function isPromptFolded(shape: PromptShape): boolean {
  * given space in, and the order they are drawn left to right.
  */
 export interface FoldLabels {
+	/** `[SIDE]` while side mode is on, drawn before the cwd in the path's slot so it is never dropped. */
+	side: Piece[];
 	/** The cwd, which is shortened rather than dropped, and only when it alone does not fit a row. */
 	path: Piece[];
 	/** ` • name` after the cwd when the session is named; part of the path's slot. */
@@ -123,7 +125,8 @@ function spreadRow(width: number, slots: Piece[][], dash: Paint): string {
  *
  *     ╶─ ~/dotfiles-main ─── opus ▱▱▱ ─── 1m 12s ─── 2 tasks ↓ 4m 10s ─── ❄4m ─── 31.4k ─╴
  *
- * The path and branch are one reading, joined by a dash, on one row or two.
+ * The path and branch are one reading, joined by a dash, on one row or two;
+ * side mode's `[SIDE]` leads that reading, so it goes wherever the path goes.
  *
  * **Priority is one fixed order: path, branch, model, timer, tasks, cache,
  * context**, which is also the left-to-right order. The rows fill in that
@@ -140,7 +143,7 @@ export function foldRows(width: number, labels: FoldLabels, dash: Paint): string
 	if (width <= 0) return [""];
 	if (width < 2) return [dash(DASH.repeat(width))];
 	const room = width - HEAD - TAIL;
-	const path = joinPathBranch(trimSlot(labels.path), trimSlot(labels.branch), trimSlot(labels.session));
+	const path = trimSlot([...labels.side, ...joinPathBranch(trimSlot(labels.path), trimSlot(labels.branch), trimSlot(labels.session))]);
 	const rest = [labels.model, labels.timer, labels.tasks, labels.cache, labels.context].map(trimSlot);
 	const slots = [path, ...rest].filter((slot) => slot.length > 0);
 	if (slots.length === 0) return [spreadRow(width, [], dash)];

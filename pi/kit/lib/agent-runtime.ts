@@ -30,7 +30,7 @@
  * an assumption, and it is only safe because every seam entry now has a
  * counterpart that runs on a session event rather than on a clock: a live
  * mark ends at {@link AgentRuntime.publishSettled}, a runtime publication at
- * `session_shutdown` (`forgetAgentRuntime`), a parked runtime at its claim or
+ * `session_shutdown` (`forgetAgentRuntime`), a detached runtime at its attach or
  * its own deadline, a stopper at the settle, a child seat and a context stop
  * at the settle that reads them. The one deliberate exception is
  * `__piKitAgentNameCounters`: it must outlive every session in the process,
@@ -43,20 +43,18 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { type Api, clampThinkingLevel, type Model } from "@earendil-works/pi-ai";
 import type { AgentSession, AgentSessionEvent, ExtensionCommandContextActions, ResourceLoader } from "@earendil-works/pi-coding-agent";
 import { type AgentSessionRuntime, createAgentSession, createAgentSessionRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
+import { AGENT_NOTIFICATION_TYPE } from "./agent-notification.ts";
 import { forgetSessionStopping, isSessionStopping, liveAgentCount, liveAgentsOf, markAgentLive, markAgentSettled, markSessionStopping, watchLiveAgentsOf } from "./agent-live-count.ts";
 import { AgentRegistry, type AgentReadBy, type AgentRecord, type AgentStatus, type StopCause, agentIsSettled, agentNameOf } from "./agent-registry.ts";
 import { type AgentFilesMode, type AgentRole, renderChildFirstMessage } from "./agent-role-tails.ts";
 import { ADVISOR_AGENT_TYPE, ADVISOR_MAIN_THREAD_ONLY, AGENT_DEPTH_CAP, DEFAULT_AGENT_TYPE, DELIVERED_RESULT_INSTRUCTION, DEPTH_LIMIT_ERROR, EXPLORE_AGENT_TYPE, thinkingLevelError } from "./agent-tool-text.ts";
 import { contextStopError, contextStopOf, forgetContextStop, handoffDocumentOf } from "./continue-session.ts";
 import { type AgentType, CHILD_THINKING, isAgentThinkingLevel } from "./agent-types.ts";
-import { AgentWaitBoard, type AgentWaitOutcome } from "./agent-wait.ts";
+import type { AgentWaitBoard, AgentWaitOutcome } from "./agent-wait.ts";
 import { type AgentWorktree, type AgentWorktreeSettlement, createAgentWorktree, settleAgentWorktree, type WorktreeExec, worktreeReportLine } from "./agent-worktree.ts";
 import { childSeatOf, declareChildSeat, type EngineChildSeat, forgetChildSeat, seatCarriesWorkflows } from "./seat.ts";
 import { shared } from "./shared.ts";
 import { toolActivityLine } from "./tool-activity-line.ts";
-
-/** The custom message type results arrive on; `agent-rows` renders it. */
-export const AGENT_NOTIFICATION_TYPE = "subagent-notification";
 
 /** After the wrap-up steer at `max_turns`, how many more turns before the run is stopped. */
 const MAX_TURNS_GRACE = 2;
@@ -104,37 +102,87 @@ const SIBLING_STAGGER_STEP_MS = 1000;
 /** The stagger never grows past Claude Code's five seconds, however wide the fan-out. */
 const SIBLING_STAGGER_CAP_MS = 5000;
 
-/** What the seat hands the runtime: everything it cannot import. */
-export interface AgentRuntimeHost {
+/**
+ * What the runtime needs that outlives any one session of the seat: nothing
+ * here may reach a session's `pi` or `ctx`, because the runtime keeps these
+ * across a handoff and pi invalidates both at the old session's shutdown.
+ */
+export interface AgentProcessDeps {
+	readonly cwd: string;
+	readonly agentDir: string;
+	/** Run a command as this process, never through `pi.exec`, which goes stale with its session. */
+	readonly exec: WorktreeExec;
+	/** Build a child's resource loader. Production loads the seat's extensions minus the vendor. */
+	readonly childLoader: (options: { cwd: string; systemPrompt: string | undefined }) => Promise<ResourceLoader>;
+	readonly now?: () => number;
+	/** Injected so the sibling stagger is scripted in a test rather than slept through. */
+	readonly sleep?: (ms: number) => Promise<void>;
+	readonly waitBoard: AgentWaitBoard;
+}
+
+/** One session of the seat, as the runtime reaches it: valid from that session's start until its shutdown handlers return. */
+export interface SeatPort {
 	readonly sessionId: string;
 	/** The seat's session file, for a child's `parentSession`. Undefined in memory. */
 	readonly sessionFile: string | undefined;
 	/** Where the seat's sessions live; children are filed there too, so `/resume` nests them. */
 	readonly sessionDir: string;
-	readonly cwd: string;
-	readonly agentDir: string;
 	/** 0 on the main seat. */
 	readonly depth: number;
 	readonly role: "main" | AgentRole;
+	/**
+	 * The agent types this session read at its start. A port fact, not a process
+	 * one (a deviation from the design's deps): each session rereads the type
+	 * files, and its `Agent` description lists what it read, so after a handoff
+	 * a type added meanwhile must be spawnable, not "Unknown subagent_type".
+	 */
 	readonly types: readonly AgentType[];
+	/** Append a record to this session's file. */
+	readonly persist: (record: AgentRecord) => void;
+	readonly emit: (channel: string, payload: unknown) => void;
+	/** Put a notification in this seat's conversation: a turn of its own when idle, appended to the turn in flight otherwise; false when no turn may start, and the result stays unread. */
+	readonly deliver: (notification: AgentNotification) => boolean;
+	readonly log: (message: string, level: "info" | "warning" | "error") => void;
+	readonly hasPendingInput: () => boolean;
 	readonly model: () => Model<Api> | undefined;
 	/** Resolve an alias (`luna`) or id (`openai-codex/gpt-6-luna`) to an enabled model; throws {@link AgentSpawnRefused} when two providers carry the family. */
 	readonly resolveModel: (spec: string) => Model<Api> | undefined;
-	/** The seat's model runtime, shared with children so they see the same providers. */
+	/**
+	 * This session's model runtime, shared with the children it spawns. A port
+	 * fact, not a process one: pi builds a new `ModelRuntime` for every session
+	 * it creates (`createAgentSessionServices` unless one is passed in), so the
+	 * next session's providers live in a different one.
+	 */
 	readonly modelRuntime: unknown;
-	readonly persist: (record: AgentRecord) => void;
-	readonly emit: (channel: string, payload: unknown) => void;
-	/** Put a notification in this seat's conversation: a turn of its own when idle, appended to the turn in flight otherwise. */
-	readonly deliver: (notification: AgentNotification) => void;
-	readonly exec: WorktreeExec;
-	readonly hasPendingInput: () => boolean;
-	/** Build a child's resource loader. Production loads the seat's extensions minus the vendor. */
-	readonly childLoader: (options: { cwd: string; systemPrompt: string | undefined }) => Promise<ResourceLoader>;
-	readonly log: (message: string, level: "info" | "warning" | "error") => void;
-	readonly now?: () => number;
-	/** Injected so the sibling stagger is scripted in a test rather than slept through. */
-	readonly sleep?: (ms: number) => Promise<void>;
-	readonly waitBoard?: AgentWaitBoard;
+}
+
+/** A port's plain facts: what a detached runtime still knows about the session it left. */
+type SeatFacts = Pick<SeatPort, "sessionId" | "sessionFile" | "sessionDir" | "depth" | "role">;
+
+/**
+ * The runtime's one tie to a session. `attached`: every write, event, delivery
+ * and log goes to the port. `detached` (a handoff in flight): records and logs
+ * are held for the session that attaches, events are dropped, nothing is
+ * delivered. `retired`: no session will own the runs again, and nothing goes
+ * anywhere; the facts stay so a late settle can still clear its marks.
+ */
+type SeatLink =
+	| { readonly state: "attached"; readonly port: SeatPort }
+	| { readonly state: "detached"; readonly facts: SeatFacts; readonly pending: Map<string, AgentRecord>; readonly logs: [string, "info" | "warning" | "error"][] }
+	| { readonly state: "retired"; readonly facts: SeatFacts };
+
+/** How long {@link AgentRuntime.retire} waits for aborted runs to settle on their own. */
+const RETIRE_BOUND_MS = 2000;
+
+/** The seat as a run started outside the runtime sees it; every member goes through the runtime's link. */
+export interface LinkedSeat {
+	readonly sessionId: string;
+	readonly cwd: string;
+	readonly depth: number;
+	/** Throws while no session is attached. */
+	model(): Model<Api> | undefined;
+	emit(channel: string, payload: unknown): void;
+	log(message: string, level: "info" | "warning" | "error"): void;
 }
 
 /** One result, as the parent's conversation receives it. */
@@ -189,7 +237,7 @@ export interface SpawnRequest {
 export class AgentSpawnRefused extends Error {
 	readonly _tag = "AgentSpawnRefused" as const;
 	constructor(
-		readonly reason: "depth" | "unknown-type" | "no-model" | "worktree" | "thinking" | "main-thread-only",
+		readonly reason: "depth" | "unknown-type" | "no-model" | "worktree" | "thinking" | "main-thread-only" | "retiring",
 		message: string,
 	) {
 		super(message);
@@ -205,7 +253,6 @@ interface LiveRun {
 	/** pi's own session-replacement flow, so `ctx.newSession` works on a child seat. */
 	readonly sessionRuntime: AgentSessionRuntime;
 	readonly worktree: AgentWorktree | undefined;
-	stopping: boolean;
 	/** Ends the stagger a run holds its first prompt for, so a stop never waits on that timer. */
 	stopSignal: (() => void) | undefined;
 	/** Until this run has ended a turn it is still in its launch batch, racing to write the cache prefix. */
@@ -230,6 +277,29 @@ interface LiveRun {
 	wrapUpSent: boolean;
 	/** Resolves once the run has settled and its record is final. */
 	done: Promise<void>;
+	/**
+	 * `stopping` once a stop was asked while it ran: it is still live, and it
+	 * settles `stopped`.
+	 * `settling` from the first step of its settle, which awaits the worktree:
+	 * from then on no message enters the run and no stop is written onto it, and
+	 * its outcome is fixed, so the bound writes the same outcome the settle would.
+	 * `settled` once that settle has written the final record; `cut off` when
+	 * {@link AgentRuntime.retire} wrote it at the bound instead.
+	 */
+	phase: { readonly at: "running" } | { readonly at: "stopping" } | { readonly at: "settling"; readonly outcome: RunOutcome } | { readonly at: "settled" } | { readonly at: "cut off" };
+}
+
+/** Running or stopping: its child has not ended, so a stop or a message still reaches it. */
+function runIsLive(run: LiveRun): boolean {
+	return run.phase.at === "running" || run.phase.at === "stopping";
+}
+
+interface RunOutcome {
+	readonly status: AgentStatus;
+	readonly error: string | undefined;
+	/** The child's report, without the worktree line the settle adds once the worktree is settled. */
+	readonly result: string | undefined;
+	readonly stoppedBy: "context" | undefined;
 }
 
 /** The last non-empty assistant text of a session, for a stopped run's partial result. */
@@ -460,20 +530,26 @@ function lifecyclePayload(record: AgentRecord): Record<string, unknown> {
 export type AgentProgressEvent = { readonly type: "message_update" | "turn_end" } | { readonly type: "tool_execution_start" | "tool_execution_end"; readonly toolCallId: string };
 
 /**
- * The runtime. Construct one per seat with the registry read back from the
+ * The runtime. Construct one per seat with the records read back from the
  * session file; every tool then goes through these methods.
  */
 export class AgentRuntime {
-	/**
-	 * The seat this runtime serves; replaced *in place* by {@link rehost} when
-	 * the seat's session is. Mutable on purpose: a run started outside this class
-	 * (a workflow, ticket 23) holds the runtime, not the host, so swapping the
-	 * field is what carries those runs across a handoff.
-	 */
-	host: AgentRuntimeHost;
-	/** The seat's registry; replaced by {@link rehost} with the new session's. */
+	/** The seat's registry, an index in memory whose every write goes through the link; replaced by {@link attach} with the claiming session's. */
 	registry: AgentRegistry;
 	readonly waits: AgentWaitBoard;
+	/**
+	 * The seat as a run started outside this class sees it: a workflow (ticket
+	 * 23) reads `model()`, `depth`, `cwd` and `emit` here. Every member goes
+	 * through the link, so no holder keeps a session's closures past its shutdown.
+	 *
+	 * The seam for a second kind of in-process run: a workflow orchestrator whose
+	 * progress, notify and run store go through this link can attach to it without
+	 * touching engine internals. Follow-up: workflow runs carry across a handoff
+	 * via the runtime's link, pending feat/workflow-parity.
+	 */
+	readonly host: LinkedSeat;
+	readonly #deps: AgentProcessDeps;
+	#link: SeatLink;
 	readonly #runs = new Map<string, LiveRun>();
 	/** Keyed by task id, so a watcher survives the run's session being replaced. */
 	readonly #progressWatchers = new Map<string, Set<(event: AgentProgressEvent) => void>>();
@@ -483,86 +559,100 @@ export class AgentRuntime {
 	 * unread for the wait to return — see {@link #claimed}.
 	 */
 	readonly #claims = new Set<{ readonly names: ReadonlySet<string> | undefined }>();
-	/** Resolves when a parked runtime is re-hosted (or retired); already resolved otherwise. */
-	#rehosted: Promise<void> = Promise.resolve();
-	#resolveRehosted: (() => void) | undefined;
-	/** What the parked host took in for the session that claims this runtime; undefined when not parked. */
-	#held: HeldForClaim | undefined;
-	/**
-	 * Whether a settle may start a turn with `host.deliver`. Closed from the park
-	 * until the claiming session's first turn begins: that turn belongs to the
-	 * continuation, and unread results ride into it through {@link takeForTurn}.
-	 */
-	#deliveryOpen = true;
+	/** Spawns and resumes that have not reached `#start` yet, for {@link retire} to wait on. */
+	readonly #starting = new Set<Promise<unknown>>();
+	/** Set once {@link retire} begins: every run that starts after it starts stopped, by this cause. */
+	#retiring: StopCause | undefined;
 
-	constructor(host: AgentRuntimeHost, registry: AgentRegistry) {
-		this.host = host;
-		this.registry = registry;
-		this.waits = host.waitBoard ?? new AgentWaitBoard();
+	constructor(deps: AgentProcessDeps, port: SeatPort, records: Iterable<AgentRecord>) {
+		this.#deps = deps;
+		this.#link = { state: "attached", port };
+		this.registry = new AgentRegistry((record) => this.#persist(record), records);
+		this.waits = deps.waitBoard;
+		const facts = () => this.#facts();
+		this.host = {
+			get sessionId() {
+				return facts().sessionId;
+			},
+			get depth() {
+				return facts().depth;
+			},
+			cwd: deps.cwd,
+			model: () => this.#port("the seat's model").model(),
+			emit: (channel, payload) => this.#emit(channel, payload),
+			log: (message, level) => this.#log(message, level),
+		};
+	}
+
+	#facts(): SeatFacts {
+		const link = this.#link;
+		if (link.state !== "attached") return link.facts;
+		const { sessionId, sessionFile, sessionDir, depth, role } = link.port;
+		return { sessionId, sessionFile, sessionDir, depth, role };
+	}
+
+	/** The attached session's port; refuses, naming `what`, while none is attached. */
+	#port(what: string): SeatPort {
+		const link = this.#link;
+		if (link.state === "attached") return link.port;
+		const why = link.state === "detached" ? "is detached for a session replacement" : "is retired";
+		throw new Error(`agent runtime of session ${link.facts.sessionId} ${why}: ${what} needs a session attached`);
+	}
+
+	#persist(record: AgentRecord): void {
+		const link = this.#link;
+		if (link.state === "attached") link.port.persist(record);
+		else if (link.state === "detached") link.pending.set(record.taskId, record);
+	}
+
+	/** Dropped unless attached: {@link attach} announces every carried run to the new dock. */
+	#emit(channel: string, payload: unknown): void {
+		const link = this.#link;
+		if (link.state === "attached") link.port.emit(channel, payload);
+	}
+
+	/** False unless attached, so the result stays unread for the next session's first turn. */
+	#deliver(notification: AgentNotification): boolean {
+		const link = this.#link;
+		return link.state === "attached" && link.port.deliver(notification);
+	}
+
+	#log(message: string, level: "info" | "warning" | "error"): void {
+		const link = this.#link;
+		if (link.state === "attached") link.port.log(message, level);
+		else if (link.state === "detached") link.logs.push([message, level]);
 	}
 
 	/**
-	 * The seat's session is being replaced: detach from it. The host and the
-	 * registry's persist are swapped for parked ones that cannot reach the
-	 * outgoing session's `pi` or `ctx` — pi invalidates both once the shutdown
-	 * handlers return, and a child still streaming kept calling them (2026-09-23:
-	 * `host.emit` ← `publishProgress` threw "extension ctx is stale" and killed
-	 * the run). Settles are held until {@link rehost} or {@link retire}.
-	 * `lib/agent-runtime-handover.ts` owns the claim deadline.
-	 */
-	park(): void {
-		if (this.#held !== undefined) return;
-		const held: HeldForClaim = { records: [], logs: [] };
-		this.#held = held;
-		this.#deliveryOpen = false;
-		this.host = parkedHost(this.host, held);
-		this.registry = this.registry.redirect((record) => held.records.push(record));
-		this.#rehosted = new Promise<void>((resolve) => {
-			this.#resolveRehosted = resolve;
-		});
-	}
-
-	/**
-	 * No session owns these runs: stop them. Used at a shutdown nothing follows
-	 * (quit, `/new`, resume, fork) and when a park's deadline passes unclaimed.
+	 * The seat's session is being replaced by its continuation (a handoff, map
+	 * C23): let go of its port. pi invalidates the outgoing session's `pi` and
+	 * `ctx` once the shutdown handlers return, and a child still streaming kept
+	 * calling them (2026-09-23: `host.emit` ← `publishProgress` threw "extension
+	 * ctx is stale" and killed the run). Until {@link attach} or {@link retire},
+	 * writes and logs are held, events are dropped, and a settle leaves its
+	 * result unread. `lib/agent-runtime-handover.ts` owns the claim deadline.
 	 *
-	 * The settles the stops cause land in a parked host and are dropped with it:
-	 * the session they belonged to is gone, and a record written there would be a
-	 * stale-ctx throw, not a record. Stated limit: a run stopped this way leaves
-	 * its last persisted status in the old file (`stoppedBy` at shutdown, not
-	 * `stopped`), which the fold reads as `lost`.
+	 * Stated limit: a quit while detached, before the continuation attaches,
+	 * writes nothing — the held writes go with the process — so the old file's
+	 * runs keep their last records and read `lost`.
 	 */
-	async retire(by: StopCause): Promise<void> {
-		// Marked before the park, so a shutdown still records who stopped each run
-		// while its host can write (issues/31 (h)).
-		const aborts = this.#stopEach(by);
-		this.park();
-		this.#unhold();
-		await aborts;
-	}
-
-	#unhold(): void {
-		const resolve = this.#resolveRehosted;
-		this.#resolveRehosted = undefined;
-		resolve?.();
-	}
-
-	/** Task ids of the runs this runtime still holds live. */
-	liveTaskIds(): string[] {
-		return [...this.#runs.keys()];
+	detach(): void {
+		if (this.#link.state !== "attached") return;
+		this.#link = { state: "detached", facts: this.#facts(), pending: new Map(), logs: [] };
 	}
 
 	/**
-	 * Follow the seat across a session replacement (a handoff, map C23): the
-	 * runs stay live and settle into the new session's registry and file. The
-	 * live marks move to the new owner; the copied records, which the fold
-	 * reads as `lost` because a file alone cannot know the process still holds
-	 * the run, go back to `running`; and the dock is told about each as if it
-	 * had just started, so its fresh instance shows them. A run whose record
-	 * the new registry does not hold is stopped — nobody would read its result.
-	 * Stated limit: that holds even when the run wrote while parked; only writes
-	 * for task ids the new registry already holds are replayed, so a run the
-	 * handoff did not carry is never adopted by its own write.
+	 * Follow the seat into the session that continues it (map C23): the runs
+	 * stay live and settle into the new session's registry and file. What was
+	 * written while detached is replayed as written — a run that settled then
+	 * lands terminal, unread, and the new dock is told its verdict. The live
+	 * marks move to the new owner; a carried copy the fold read as `lost`,
+	 * because a file alone cannot know the process still holds the run, goes
+	 * back to `running`; and the dock is told about each live run as if it had
+	 * just started. A run whose record the new registry does not hold is
+	 * stopped — nobody would read its result. Stated limit: only writes for task
+	 * ids the new registry already holds are replayed, so a run the handoff did
+	 * not carry is never adopted by its own write.
 	 *
 	 * What moves is read off the **live seam**, not off `#runs`, because `#runs`
 	 * is only the runs this class drives: a workflow's run (ticket 23) is in the
@@ -572,49 +662,113 @@ export class AgentRuntime {
 	 * invariant is *a live run is reachable from its owner session*, and the seam
 	 * is the one place that knows what is live.
 	 */
-	async rehost(host: AgentRuntimeHost, registry: AgentRegistry): Promise<void> {
-		const previous = this.host;
-		const held = this.#held;
-		this.#held = undefined;
-		this.host = host;
+	attach(port: SeatPort, carried: Iterable<AgentRecord>): void {
+		const link = this.#link;
+		if (link.state !== "detached") throw new Error(`agent runtime of session ${this.#facts().sessionId} is ${link.state}: only a detached runtime can be attached`);
+		const previous = link.facts.sessionId;
+		this.#link = { state: "attached", port };
+		const registry = new AgentRegistry((record) => this.#persist(record), carried);
 		this.registry = registry;
-		// Writes made while parked are newer than the copies the handoff carried.
-		for (const record of held?.records ?? []) {
-			if (registry.byTaskId(record.taskId) !== undefined) registry.put({ ...record, ownerSessionId: host.sessionId });
+		// Writes made while detached are newer than the copies the handoff carried.
+		for (const record of link.pending.values()) {
+			if (registry.byTaskId(record.taskId) === undefined) continue;
+			const stored = registry.put({ ...record, ownerSessionId: port.sessionId });
+			if (!agentIsSettled(stored.status)) continue;
+			port.emit("subagents:created", lifecyclePayload(stored));
+			port.emit(stored.status === "completed" ? "subagents:completed" : "subagents:failed", lifecyclePayload(stored));
 		}
-		for (const [message, level] of held?.logs ?? []) host.log(message, level);
-		const orphans: string[] = [];
-		for (const taskId of [...liveAgentsOf(previous.sessionId)]) {
+		for (const [message, level] of link.logs) port.log(message, level);
+		for (const taskId of [...liveAgentsOf(previous)]) {
 			const record = registry.byTaskId(taskId);
-			markAgentSettled(previous.sessionId, taskId);
-			if (record === undefined || this.#runs.get(taskId)?.stopping === true) {
-				orphans.push(taskId);
-				continue;
-			}
-			markAgentLive(host.sessionId, taskId);
-			const live = agentIsSettled(record.status) ? registry.put({ ...record, status: "running", result: undefined, error: undefined, completedAt: undefined }) : record;
-			host.emit("subagents:created", lifecyclePayload(live));
-			host.emit("subagents:started", lifecyclePayload(live));
-		}
-		for (const taskId of orphans) {
+			markAgentSettled(previous, taskId);
 			const run = this.#runs.get(taskId);
-			if (run === undefined) {
-				// A foreign run — a workflow's — stops through the map it registered in.
-				await descendantStoppers().get(taskId)?.();
+			if (record === undefined || run?.phase.at === "stopping") {
+				// Not awaited: pi's abort waits for idle, and a child that ignores it would hold this session's start forever.
+				if (run !== undefined) {
+					this.#markStopping(run, "orphaned");
+					void run.session.abort().catch(() => {});
+				} else {
+					// A foreign run — a workflow's — stops through the map it registered in.
+					void descendantStoppers().get(taskId)?.().catch(() => {});
+				}
 				continue;
 			}
-			this.#markStopping(run, "orphaned");
-			await run.session.abort();
+			markAgentLive(port.sessionId, taskId);
+			const live = record.status === "lost" ? registry.put({ ...record, status: "running" }) : record;
+			port.emit("subagents:created", lifecyclePayload(live));
+			port.emit("subagents:started", lifecyclePayload(live));
 		}
-		this.#unhold();
+	}
+
+	/**
+	 * No session will own these runs again: stop them, then let go of the
+	 * session. Awaited in the seat's shutdown handler at quit, `/new`, resume,
+	 * fork and reload, while the port can still write; also called when a
+	 * detached runtime's claim deadline passes.
+	 *
+	 * Each run is aborted and settles on the normal path, so the file reads
+	 * `stopped` with its final cost and its worktree outcome; a spawn or resume
+	 * in flight starts its run already stopping, and is waited for too, while one
+	 * that begins after this call is refused. A run is finished only once its
+	 * own settle has written. The wait is bounded at
+	 * {@link RETIRE_BOUND_MS} because pi's abort waits for the session to go
+	 * idle, which a child that ignores the abort never does. Stated limit: a run
+	 * still unfinished at the bound delays quit by the bound. One whose child had
+	 * ended (its worktree removal ran long) is written with the outcome its settle
+	 * fixed; one whose child never ended is written `stopped` with the cost
+	 * counted so far. Either way its worktree outcome is not recorded, and its
+	 * own late settle writes nothing. A spawn still in flight at the bound (a
+	 * slow child loader, say) starts its run stopped after the link has retired:
+	 * the child never prompts and its worktree is settled, but its record stays
+	 * `queued` in the file and reads `lost`. Retired from detached, everything the
+	 * settles write is dropped with the held writes: the session they belonged
+	 * to is gone.
+	 */
+	async retire(by: StopCause): Promise<void> {
+		if (this.#retiring !== undefined) return;
+		this.#retiring = by;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const bound = new Promise<void>((resolve) => {
+			timer = setTimeout(resolve, RETIRE_BOUND_MS);
+		});
+		// A foreign run (a workflow's) is stopped first, through the map it registered in: its stopper ends it before any child of it settles, so no child reads as dead.
+		const foreign = [...liveAgentsOf(this.#facts().sessionId)].filter((taskId) => !this.#runs.has(taskId)).map((taskId) => descendantStoppers().get(taskId)?.());
+		void this.#stopEach(by).catch(() => {});
+		// A spawn or resume in flight starts its run already stopping (`#start`); waited for, so that run settles on the normal path too.
+		await Promise.race([Promise.allSettled([...this.#starting]), bound]);
+		const runs = [...this.#runs.values()];
+		await Promise.race([Promise.allSettled([...runs.map((run) => run.done), ...foreign]), bound]);
+		clearTimeout(timer);
+		for (const run of runs) {
+			const phase = run.phase;
+			if (phase.at === "settled") continue;
+			run.phase = { at: "cut off" };
+			if (this.#runs.get(run.taskId) === run) this.#runs.delete(run.taskId);
+			descendantStoppers().delete(run.taskId);
+			const record = this.registry.byTaskId(run.taskId);
+			if (record === undefined) {
+				markAgentSettled(this.#facts().sessionId, run.taskId);
+				continue;
+			}
+			const outcome: RunOutcome =
+				phase.at === "settling" ? phase.outcome : { status: "stopped", error: undefined, result: boundReport(childReport(run.session, run.lastText), record.sessionFile), stoppedBy: undefined };
+			const ended = this.#endedRecord(record, run, outcome);
+			this.publishSettled(this.registry.byName(record.name)?.taskId === record.taskId ? this.registry.put(ended) : ended);
+		}
+		this.#link = { state: "retired", facts: this.#facts() };
+	}
+
+	/** Task ids of the runs this runtime still holds live. */
+	liveTaskIds(): string[] {
+		return [...this.#runs.keys()];
 	}
 
 	#now(): number {
-		return this.host.now?.() ?? Date.now();
+		return this.#deps.now?.() ?? Date.now();
 	}
 
 	#sleep(ms: number): Promise<void> {
-		if (this.host.sleep !== undefined) return this.host.sleep(ms);
+		if (this.#deps.sleep !== undefined) return this.#deps.sleep(ms);
 		return new Promise<void>((resolve) => {
 			setTimeout(resolve, ms);
 		});
@@ -650,11 +804,13 @@ export class AgentRuntime {
 	 * identify itself while Joel is watching.
 	 */
 	#markStopping(run: LiveRun, by: StopCause): void {
-		run.stopping = true;
+		// A settling run's outcome is decided: a stop written now would sit on a completed record.
+		if (!runIsLive(run)) return;
+		run.phase = { at: "stopping" };
 		run.stopSignal?.();
 		const name = this.registry.byTaskId(run.taskId)?.name;
 		if (name !== undefined) this.registry.update(name, { stoppedBy: by });
-		this.host.log(`agent ${name ?? run.taskId}: stopping — asked by ${by}`, "info");
+		this.#log(`agent ${name ?? run.taskId}: stopping — asked by ${by}`, "info");
 	}
 
 	/** A live run's session, for tests and for the stop path. */
@@ -708,21 +864,21 @@ export class AgentRuntime {
 
 	/**
 	 * Hand every unread result under `names` (all of them when `names` is
-	 * undefined) to `hand` as one message, and mark them read only once `hand`
-	 * has returned. Undefined when nothing is unread.
+	 * undefined) to `hand` as one message, marked read while it runs and kept
+	 * read only when it takes them. Undefined when nothing is unread.
 	 *
 	 * This is the engine's only path from unread to read (`AgentRegistry.update`
-	 * cannot set `readBy`; `markRead` is called from here), so a result
+	 * cannot set `readBy`; `AgentRegistry.consume` is called from here), so a result
 	 * cannot be consumed by a path that does not deliver it — the 2026-09-03
 	 * shape where `TaskOutput` said "Nothing to report" while `ListAgents`
-	 * showed the completion. A `hand` that throws leaves every record unread
-	 * for the next reader: full result delivered once, never lost (C7).
+	 * showed the completion. A `hand` that throws or returns false leaves every
+	 * record unread for the next reader: full result delivered once, never lost (C7).
 	 *
 	 * `by` is what the reader can honestly claim afterwards: `"tool"` when the
 	 * text is in a tool result, `"handed"` when it has only been given to pi's
 	 * message queue.
 	 */
-	takeUnread(names: readonly string[] | undefined, hand: (notification: AgentNotification) => void, by: AgentReadBy): AgentNotification | undefined {
+	takeUnread(names: readonly string[] | undefined, hand: (notification: AgentNotification) => boolean | void, by: AgentReadBy): AgentNotification | undefined {
 		const records = this.unread().filter((record) => names === undefined || names.includes(record.name));
 		return this.#take(records, hand, by);
 	}
@@ -733,7 +889,7 @@ export class AgentRuntime {
 	 * notification is in the session file.
 	 *
 	 * A `followUp` is appended at the *end* of the turn in flight, so between
-	 * `host.deliver` and the text appearing there is a gap as long as the seat
+	 * `port.deliver` and the text appearing there is a gap as long as the seat
 	 * keeps working — and on 2026-09-05 a delivery crossed a whole turn while
 	 * `TaskOutput` insisted it was already in the conversation. So a handed
 	 * result is marked read only against what `seen` reports, and one that never
@@ -744,10 +900,6 @@ export class AgentRuntime {
 	 * seat otherwise has no source for (ticket 60).
 	 */
 	takeForTurn(seen: (taskId: string) => boolean, hand: (notification: AgentNotification) => void): AgentNotification | undefined {
-		// A turn has begun on this host, so a settle may start the next one.
-		// Stated limit: if a continuation's first message never starts a turn,
-		// results settled since the park wait unread until the next user turn.
-		if (this.#held === undefined) this.#deliveryOpen = true;
 		const at = this.#now();
 		const missing: AgentRecord[] = [];
 		for (const record of this.registry.all()) {
@@ -756,19 +908,17 @@ export class AgentRuntime {
 				missing.push(record);
 				continue;
 			}
-			this.registry.markRead(record.name, record.taskId, "conversation", at);
+			this.registry.markHandedSeen(record.name, record.taskId, at);
 		}
 		const records = [...this.unread(), ...missing].sort((a, b) => (a.completedAt ?? 0) - (b.completedAt ?? 0));
 		return this.#take(records, hand, "conversation", at);
 	}
 
-	#take(records: readonly AgentRecord[], hand: (notification: AgentNotification) => void, by: AgentReadBy, when?: number): AgentNotification | undefined {
+	#take(records: readonly AgentRecord[], hand: (notification: AgentNotification) => boolean | void, by: AgentReadBy, when?: number): AgentNotification | undefined {
 		const at = when ?? this.#now();
 		if (records.length === 0) return undefined;
 		const notification = batchNotification(records, at, by);
-		hand(notification);
-		for (const record of records) this.registry.markRead(record.name, record.taskId, by, at);
-		return notification;
+		return this.registry.consume(records, by, at, () => hand(notification)) ? notification : undefined;
 	}
 
 	/**
@@ -778,7 +928,7 @@ export class AgentRuntime {
 	 */
 	#seatChain(): string[] {
 		const names: string[] = [];
-		let sessionId: string | undefined = this.host.sessionId;
+		let sessionId: string | undefined = this.#facts().sessionId;
 		for (let hop = 0; hop <= AGENT_DEPTH_CAP && sessionId !== undefined; hop++) {
 			const seat = childSeatOf(sessionId);
 			if (seat === undefined) break;
@@ -817,16 +967,29 @@ export class AgentRuntime {
 	// ---- spawn ------------------------------------------------------------------
 
 	/** Start a child. Returns its record at `queued`; the run proceeds in the background. */
-	async spawn(request: SpawnRequest): Promise<AgentRecord> {
-		if (this.host.depth >= AGENT_DEPTH_CAP) throw new AgentSpawnRefused("depth", DEPTH_LIMIT_ERROR);
+	spawn(request: SpawnRequest): Promise<AgentRecord> {
+		return this.#tracked(this.#spawn(request));
+	}
+
+	#tracked<T>(starting: Promise<T>): Promise<T> {
+		this.#starting.add(starting);
+		const untrack = () => this.#starting.delete(starting);
+		starting.then(untrack, untrack);
+		return starting;
+	}
+
+	async #spawn(request: SpawnRequest): Promise<AgentRecord> {
+		if (this.#retiring !== undefined) throw new AgentSpawnRefused("retiring", "The seat is shutting down: no agent can start now.");
+		const port = this.#port("spawning an agent");
+		if (port.depth >= AGENT_DEPTH_CAP) throw new AgentSpawnRefused("depth", DEPTH_LIMIT_ERROR);
 		const typeName = request.subagentType ?? DEFAULT_AGENT_TYPE;
-		if (typeName === ADVISOR_AGENT_TYPE && this.host.depth > 0) throw new AgentSpawnRefused("main-thread-only", ADVISOR_MAIN_THREAD_ONLY);
-		const type = this.host.types.find((candidate) => candidate.name === typeName);
+		if (typeName === ADVISOR_AGENT_TYPE && port.depth > 0) throw new AgentSpawnRefused("main-thread-only", ADVISOR_MAIN_THREAD_ONLY);
+		const type = port.types.find((candidate) => candidate.name === typeName);
 		if (type === undefined && typeName !== DEFAULT_AGENT_TYPE) {
-			throw new AgentSpawnRefused("unknown-type", `Unknown subagent_type "${typeName}". Available: ${this.host.types.map((t) => t.name).join(", ") || "(none on disk)"}.`);
+			throw new AgentSpawnRefused("unknown-type", `Unknown subagent_type "${typeName}". Available: ${port.types.map((t) => t.name).join(", ") || "(none on disk)"}.`);
 		}
 		const role: AgentRole = typeName === "lead" ? "lead" : "worker";
-		const model = this.#resolveChildModel(request.model ?? type?.model);
+		const model = this.#resolveChildModel(port, request.model ?? type?.model);
 		if (model === undefined) throw new AgentSpawnRefused("no-model", `No model for agent type "${typeName}"${request.model ? ` (asked for "${request.model}")` : ""}. Enable one in settings or pick another.`);
 		const asked = request.thinking ?? type?.thinking ?? this.#childThinking();
 		if (!isAgentThinkingLevel(asked)) throw new AgentSpawnRefused("thinking", thinkingLevelError(asked));
@@ -835,30 +998,30 @@ export class AgentRuntime {
 		const thinking: ThinkingLevel = clampThinkingLevel(model, asked);
 		const name = agentNameOf(request.name) ?? this.registry.nextName(typeName);
 		this.#refuseSelfOrAncestor(name);
-		const depth = this.host.depth + 1;
+		const depth = port.depth + 1;
 
 		let worktree: AgentWorktree | undefined;
 		if (request.isolation === "worktree") {
 			try {
-				worktree = await createAgentWorktree(this.host.exec, this.host.cwd, name);
+				worktree = await createAgentWorktree(this.#deps.exec, this.#deps.cwd, name);
 			} catch (error) {
 				throw new AgentSpawnRefused("worktree", error instanceof Error ? error.message : String(error));
 			}
 		}
-		const cwd = worktree?.path ?? this.host.cwd;
+		const cwd = worktree?.path ?? this.#deps.cwd;
 		const files: AgentFilesMode = worktree ? { kind: "worktree", branch: worktree.branch, path: worktree.path } : { kind: "shared" };
 
-		const sessionManager = SessionManager.create(cwd, this.host.sessionDir, this.host.sessionFile !== undefined ? { parentSession: this.host.sessionFile } : {});
+		const sessionManager = SessionManager.create(cwd, port.sessionDir, port.sessionFile !== undefined ? { parentSession: port.sessionFile } : {});
 		const childSessionId = sessionManager.getSessionId();
 		const liveCount = liveAgentCount() + 1;
 		const seat: EngineChildSeat = {
 			name,
 			role,
 			depth,
-			parentSessionId: this.host.sessionId,
+			parentSessionId: port.sessionId,
 			workflowChild: request.workflowChild === true,
 			// Inherited, not re-decided: a child of a seat with no workflows has none.
-			workflows: seatCarriesWorkflows(this.host.sessionId),
+			workflows: seatCarriesWorkflows(port.sessionId),
 			prompt: type?.prompt ? { kind: "own" } : { kind: "inherit" },
 		};
 		declareChildSeat(childSessionId, seat);
@@ -866,7 +1029,7 @@ export class AgentRuntime {
 		const record = this.registry.put({
 			name,
 			taskId: shortId(),
-			ownerSessionId: this.host.sessionId,
+			ownerSessionId: this.#facts().sessionId,
 			type: typeName,
 			description: request.description,
 			status: "queued",
@@ -891,8 +1054,8 @@ export class AgentRuntime {
 			toolCallId: request.toolCallId,
 			workflowChild: request.workflowChild === true,
 		});
-		this.host.emit("subagents:created", lifecyclePayload(record));
-		markAgentLive(this.host.sessionId, record.taskId);
+		this.#emit("subagents:created", lifecyclePayload(record));
+		markAgentLive(this.#facts().sessionId, record.taskId);
 
 		const facts = { role, name, depth, liveCount, files, workflowChild: request.workflowChild === true };
 		const firstMessage = renderChildFirstMessage(facts, request.prompt);
@@ -904,6 +1067,7 @@ export class AgentRuntime {
 			systemPrompt: type?.prompt ? type.prompt : undefined,
 			seat,
 			sessionName: `${name}#${record.taskId.slice(1, 7)}`,
+			modelRuntime: port.modelRuntime,
 		});
 		await this.#start(record.name, sessionRuntime, worktree, firstMessage, request.maxTurns, request.onFirstPrompt);
 		return this.registry.byName(name) ?? record;
@@ -925,12 +1089,15 @@ export class AgentRuntime {
 		systemPrompt: string | undefined;
 		seat: EngineChildSeat;
 		sessionName: string;
+		/** The spawning session's: a child keeps the ModelRuntime of the session that spawned it, across its own replacements and its parent's. */
+		modelRuntime: unknown;
 	}): Promise<AgentSessionRuntime> {
-		const host = this.host;
+		const { childLoader, agentDir } = this.#deps;
+		const modelRuntime = spec.modelRuntime;
 		return createAgentSessionRuntime(
 			async ({ cwd, agentDir, sessionManager, sessionStartEvent }) => {
 				declareChildSeat(sessionManager.getSessionId(), spec.seat);
-				const loader = await host.childLoader({ cwd, systemPrompt: spec.systemPrompt });
+				const loader = await childLoader({ cwd, systemPrompt: spec.systemPrompt });
 				const { session, extensionsResult, modelFallbackMessage } = await createAgentSession({
 					cwd,
 					agentDir,
@@ -942,7 +1109,7 @@ export class AgentRuntime {
 					// SAFETY: pi types `modelRuntime` as its `ModelRuntime` class; the seat reads it off
 					// `ctx.modelRegistry`'s private field as `unknown` because the extension API exposes
 					// only the registry facade. Passing the seat's own runtime is what the vendor does.
-					...(host.modelRuntime !== undefined ? { modelRuntime: host.modelRuntime as never } : {}),
+					...(modelRuntime !== undefined ? { modelRuntime: modelRuntime as never } : {}),
 				});
 				session.setSessionName(spec.sessionName);
 				return {
@@ -953,13 +1120,13 @@ export class AgentRuntime {
 					diagnostics: [],
 				};
 			},
-			{ cwd: spec.cwd, agentDir: this.host.agentDir, sessionManager: spec.sessionManager },
+			{ cwd: spec.cwd, agentDir, sessionManager: spec.sessionManager },
 		);
 	}
 
-	#resolveChildModel(spec: string | undefined): Model<Api> | undefined {
-		if (spec === undefined || spec.trim() === "") return this.host.model();
-		return this.host.resolveModel(spec.trim());
+	#resolveChildModel(port: SeatPort, spec: string | undefined): Model<Api> | undefined {
+		if (spec === undefined || spec.trim() === "") return port.model();
+		return port.resolveModel(spec.trim());
 	}
 
 	/**
@@ -982,7 +1149,6 @@ export class AgentRuntime {
 			session: sessionRuntime.session,
 			sessionRuntime,
 			worktree,
-			stopping: false,
 			stopSignal: undefined,
 			firstTurnDone: false,
 			handoffPending: false,
@@ -998,6 +1164,7 @@ export class AgentRuntime {
 			turns: 0,
 			wrapUpSent: false,
 			done: Promise.resolve(),
+			phase: { at: "running" },
 		};
 		let lastProgressAt = 0;
 		// Any event at all is a sign of life, so the age of the last one is the
@@ -1010,7 +1177,7 @@ export class AgentRuntime {
 			lastProgressAt = at;
 			// The context the child is carrying: how close it is to burning its
 			// window, which the record does not learn until settle.
-			this.host.emit(AGENT_PROGRESS_CHANNEL, { id: run.taskId, name, toolUses: run.toolUses, totalTokens: run.totalTokens, lastActivityAt: at, ...(activity !== undefined ? { activity } : {}) });
+			this.#emit(AGENT_PROGRESS_CHANNEL, { id: run.taskId, name, toolUses: run.toolUses, totalTokens: run.totalTokens, lastActivityAt: at, ...(activity !== undefined ? { activity } : {}) });
 		};
 		const listener = (event: AgentSessionEvent) => {
 			if (event.type === "tool_execution_start") run.toolUses++;
@@ -1026,7 +1193,7 @@ export class AgentRuntime {
 						? { type: event.type, toolCallId: event.toolCallId }
 						: undefined;
 			if (progress !== undefined) for (const watcher of this.#progressWatchers.get(record.taskId) ?? []) watcher(progress);
-			if (event.type === "message_end" && event.message.role === "assistant" && !run.stopping) {
+			if (event.type === "message_end" && event.message.role === "assistant" && run.phase.at !== "stopping") {
 				const usage = (event.message as { usage?: { output?: number; totalTokens?: number; cost?: { total?: number } } }).usage;
 				run.costUsd += usage?.cost?.total ?? 0;
 				// The billed total is summed over cached reads, so adding it up counts
@@ -1052,7 +1219,7 @@ export class AgentRuntime {
 				if (!run.wrapUpSent && run.turns >= maxTurns) {
 					run.wrapUpSent = true;
 					void run.session.steer(WRAP_UP_STEER);
-				} else if (run.wrapUpSent && run.turns >= maxTurns + MAX_TURNS_GRACE && !run.stopping) {
+				} else if (run.wrapUpSent && run.turns >= maxTurns + MAX_TURNS_GRACE && run.phase.at !== "stopping") {
 					this.#markStopping(run, "max-turns");
 					void run.session.abort();
 				}
@@ -1108,21 +1275,23 @@ export class AgentRuntime {
 				// Already settled; nothing to stop.
 			}
 		});
+		// Its spawn was in flight when the seat retired: it never prompts, and settles stopped with its worktree.
+		if (this.#retiring !== undefined) this.#markStopping(run, this.#retiring);
 		this.registry.update(name, { status: "running" });
-		this.host.emit("subagents:started", lifecyclePayload(this.registry.byName(name) ?? record));
+		this.#emit("subagents:started", lifecyclePayload(this.registry.byName(name) ?? record));
 
 		run.done = (async () => {
 			let error: string | undefined;
 			try {
 				const stagger = this.#firstPromptDelayMs();
 				if (stagger > 0) await this.#stagger(run, stagger);
-				if (!run.stopping) {
+				if (run.phase.at !== "stopping") {
 					onFirstPrompt?.();
 					await run.session.prompt(prompt);
 				}
 				// A message sent with `interrupt: true` aborts the current turn; the
 				// run continues with that message rather than settling.
-				while (run.interruptWith !== undefined && !run.stopping) {
+				while (run.interruptWith !== undefined && run.phase.at !== "stopping") {
 					const next = run.interruptWith;
 					run.interruptWith = undefined;
 					await run.session.prompt(next);
@@ -1163,7 +1332,7 @@ export class AgentRuntime {
 				// releases is a settle the seam or the session should have announced
 				// and did not. Saying so is the difference between a hole and a hole
 				// nobody can find (38's deletion 4): the poll stays, and it reports.
-				if (releasedByPoll) this.host.log(`agent ${this.registry.byTaskId(run.taskId)?.name ?? run.taskId}: the quiet loop was released by its ${QUIET_POLL_MS}ms backstop poll, not by an event — a settle went unannounced`, "warning");
+				if (releasedByPoll) this.#log(`agent ${this.registry.byTaskId(run.taskId)?.name ?? run.taskId}: the quiet loop was released by its ${QUIET_POLL_MS}ms backstop poll, not by an event — a settle went unannounced`, "warning");
 				return;
 			}
 			// Woken by the child's own settle (its runtime marks it on the seam), by
@@ -1193,14 +1362,29 @@ export class AgentRuntime {
 	}
 
 	async #settle(taskId: string, run: LiveRun, thrown: string | undefined): Promise<void> {
-		// A run that ends while the seat's session is being replaced settles into
-		// the replacement, not into the session on its way out.
-		await this.#rehosted;
+		const release = async () => {
+			const childSessionId = run.session.sessionId;
+			forgetChildSeat(childSessionId);
+			forgetSessionStopping(childSessionId);
+			forgetContextStop(childSessionId);
+			try {
+				// Through the runtime, not the session: its `session_shutdown` is what closes the child's extensions' scopes.
+				await run.sessionRuntime.dispose();
+			} catch {
+				// A session that will not dispose is not worth failing the settle over.
+			}
+		};
+		// {@link retire} cut this run off at its bound and wrote its record; the late settle only cleans up.
+		if (run.phase.at === "cut off") return release();
+		// Detached, this lands in the held writes and the delivery is refused: the result waits, unread, for the session that attaches.
 		const record = this.registry.byTaskId(taskId);
-		this.#runs.delete(taskId);
 		descendantStoppers().delete(taskId);
-		markAgentSettled(this.host.sessionId, taskId);
-		if (record === undefined) return;
+		markAgentSettled(this.#facts().sessionId, taskId);
+		if (record === undefined) {
+			run.phase = { at: "settled" };
+			if (this.#runs.get(taskId) === run) this.#runs.delete(taskId);
+			return release();
+		}
 		const last = run.session.messages[run.session.messages.length - 1];
 		const stopReason = last?.role === "assistant" ? last.stopReason : undefined;
 		const errorMessage = last?.role === "assistant" ? (last as { errorMessage?: string }).errorMessage : undefined;
@@ -1214,7 +1398,7 @@ export class AgentRuntime {
 		if (contextStop !== undefined) {
 			status = "stopped";
 			error = contextStopError(contextStop, record.sessionFile);
-		} else if (run.stopping) {
+		} else if (run.phase.at === "stopping") {
 			status = "stopped";
 			error = error ?? (run.wrapUpSent ? `max_turns reached` : undefined);
 		} else if (thrown !== undefined || stopReason === "error") {
@@ -1224,46 +1408,54 @@ export class AgentRuntime {
 			status = "error";
 			error = errorMessage ?? "aborted";
 		}
-		let result = boundReport(childReport(run.session, run.lastText), record.sessionFile);
+		const outcome: RunOutcome = { status, error, result: boundReport(childReport(run.session, run.lastText), record.sessionFile), stoppedBy: contextStop !== undefined ? "context" : undefined };
+		run.phase = { at: "settling", outcome };
+		let result = outcome.result;
 		let settlement: AgentWorktreeSettlement | undefined;
 		if (run.worktree !== undefined) {
 			try {
-				settlement = await settleAgentWorktree(this.host.exec, run.worktree);
+				settlement = await settleAgentWorktree(this.#deps.exec, run.worktree);
 				result = `${result ?? ""}\n\n${worktreeReportLine(settlement)}`.trim();
 			} catch (worktreeError) {
-				this.host.log(`agent ${record.name}: worktree settle failed: ${worktreeError instanceof Error ? worktreeError.message : String(worktreeError)}`, "warning");
+				this.#log(`agent ${record.name}: worktree settle failed: ${worktreeError instanceof Error ? worktreeError.message : String(worktreeError)}`, "warning");
 			}
 		}
+		// The worktree settle awaits: the bound may have cut this run off meanwhile, and the
+		// check and the write below are one synchronous step, so exactly one of the two writes.
+		if (run.phase.at === "cut off") return release();
+		// Out of `#runs` only now, so a retire that begins mid-settle still finds this run and waits for this write.
+		run.phase = { at: "settled" };
+		if (this.#runs.get(taskId) === run) this.#runs.delete(taskId);
+		// Read again after the await: an attach meanwhile moved the record to a new registry and owner.
+		const base = this.registry.byTaskId(taskId) ?? record;
 		// Only the newest run under the name updates the name's record; an
 		// older run whose name was reused settles into its own task id only.
-		const current = this.registry.byName(record.name);
-		const settled: AgentRecord = {
-			...record,
-			status,
-			...(contextStop !== undefined ? { stoppedBy: "context" as const } : {}),
-			result,
-			error,
+		const current = this.registry.byName(base.name);
+		const settled = this.#endedRecord(base, run, { ...outcome, result });
+		const stored = current?.taskId === base.taskId ? this.registry.put(settled) : settled;
+		void release();
+		this.publishSettled(stored);
+	}
+
+	#endedRecord(base: AgentRecord, run: LiveRun, outcome: RunOutcome): AgentRecord {
+		const at = this.#now();
+		return {
+			...base,
+			status: outcome.status,
+			...(outcome.stoppedBy !== undefined ? { stoppedBy: outcome.stoppedBy } : {}),
+			result: outcome.result,
+			error: outcome.error,
 			toolUses: run.toolUses,
 			costUsd: run.costUsd,
 			totalTokens: run.totalTokens,
 			outputTokens: run.outputTokens,
-			completedAt: this.#now(),
+			completedAt: at,
 			// A silent run's result is the spawner's to read: marked here, at settle,
 			// so no turn can drain it in the gap before the spawner does — and named
 			// `spawner`, because it never enters anyone's conversation.
 			readBy: run.silent ? "spawner" : undefined,
-			readAt: run.silent ? this.#now() : undefined,
+			readAt: run.silent ? at : undefined,
 		};
-		const stored = current?.taskId === record.taskId ? this.registry.put(settled) : settled;
-		forgetChildSeat(record.sessionId);
-		forgetSessionStopping(record.sessionId);
-		forgetContextStop(record.sessionId);
-		try {
-			run.session.dispose();
-		} catch {
-			// A session that will not dispose is not worth failing the settle over.
-		}
-		this.publishSettled(stored);
 	}
 
 	/**
@@ -1284,26 +1476,34 @@ export class AgentRuntime {
 		// this class cannot leave one behind under a session id it captured before a
 		// handoff (38's finding 2). Idempotent: this runtime's own settle clears it
 		// first, because it must clear it even when the record is gone.
-		markAgentSettled(this.host.sessionId, settled.taskId);
-		this.host.emit(settled.status === "completed" ? "subagents:completed" : "subagents:failed", lifecyclePayload(settled));
+		markAgentSettled(this.#facts().sessionId, settled.taskId);
+		this.#emit(settled.status === "completed" ? "subagents:completed" : "subagents:failed", lifecyclePayload(settled));
 		this.waits.notify();
+		this.#offer(settled);
+	}
+
+	/** Offer every unread result to the conversation again, as if it had just settled. */
+	offerUnread(): void {
+		// `unread()` is a snapshot, and one explorer batch marks the rest of it read.
+		for (const record of this.unread()) {
+			const current = this.registry.byTaskId(record.taskId);
+			if (current !== undefined) this.#offer(current);
+		}
+	}
+
+	#offer(settled: AgentRecord): void {
 		if (settled.readBy !== undefined || this.#claimed(settled.name)) return;
 		// An older run whose name has since been reused settles into its task id
 		// only; nobody is waiting on it.
 		if (this.registry.byName(settled.name)?.taskId !== settled.taskId) return;
-		if (isSessionStopping(this.host.sessionId)) return;
-		// Parked, or re-hosted before the new session's first turn: a delivery would
-		// start a turn ahead of the continuation's first message, one pi never ran
-		// `before_agent_start` for (2026-09-23). The result stays unread and rides
-		// that first turn instead.
-		if (!this.#deliveryOpen) return;
+		if (isSessionStopping(this.#facts().sessionId)) return;
 		const batching = settled.type === EXPLORE_AGENT_TYPE;
 		if (batching && this.registry.live().some((record) => record.type === EXPLORE_AGENT_TYPE)) return;
 		const names = batching ? this.unread().filter((record) => record.type === EXPLORE_AGENT_TYPE && !this.#claimed(record.name)).map((record) => record.name) : [settled.name];
-		// `deliver` hands the message to pi's queue and gets nothing back, so
-		// `handed` is the whole of what this path can claim; `before_agent_start`
-		// is where it becomes `conversation` (or is delivered again).
-		this.takeUnread(names, (notification) => this.host.deliver(notification), "handed");
+		// `deliver` hands the message to pi's queue and learns only whether it was
+		// taken, so `handed` is the whole of what this path can claim;
+		// `before_agent_start` is where it becomes `conversation` (or is delivered again).
+		this.takeUnread(names, (notification) => this.#deliver(notification), "handed");
 	}
 
 	// ---- wait -------------------------------------------------------------------------
@@ -1327,7 +1527,8 @@ export class AgentRuntime {
 			known.length > 0
 				? () => settledCount() === known.length
 				: () => this.unread().length > 0 || this.registry.live().length === 0;
-		if (this.host.hasPendingInput() && !condition()) {
+		const link = this.#link;
+		if (link.state === "attached" && link.port.hasPendingInput() && !condition()) {
 			return { outcome: { kind: "interrupted", by: "Joel" }, done: settledCount(), of: watched.length, unknown };
 		}
 		// Claimed for the whole wait, so a result that settles mid-wait is this
@@ -1354,12 +1555,31 @@ export class AgentRuntime {
 	 * with `interrupt`. Finished or lost: resumed from its transcript as a new
 	 * run under the same name.
 	 */
-	async send(name: string, message: string, interrupt: boolean, toolCallId?: string): Promise<{ kind: "queued" | "interrupted" | "resumed"; record: AgentRecord }> {
+	async send(name: string, message: string, interrupt: boolean, toolCallId?: string, signal?: AbortSignal): Promise<{ kind: "queued" | "interrupted" | "resumed"; record: AgentRecord }> {
 		this.#refuseSelfOrAncestor(name);
-		const record = this.registry.byName(name);
+		let record = this.registry.byName(name);
 		if (record === undefined) throw new AgentSendRefused("unknown-agent", `No agent named "${name}" — run ListAgents to see targets.`);
 		const run = this.#runs.get(record.taskId);
-		if (run !== undefined && !agentIsSettled(record.status)) {
+		if (run !== undefined && !runIsLive(run)) {
+			// Its settle is writing the result: the message resumes the agent once that is on
+			// record, instead of starting a turn that the settle's dispose would cut short.
+			// The settle's git calls can take ~25 s, and pi's abort before shutdown waits for
+			// this tool call, so the call's own abort ends the wait.
+			let cancel = (): void => {};
+			const aborted = new Promise<true>((resolve) => (cancel = () => resolve(true)));
+			if (signal?.aborted) cancel();
+			signal?.addEventListener("abort", cancel, { once: true });
+			let cancelled: boolean;
+			try {
+				cancelled = await Promise.race([run.done.then(() => false), aborted]);
+			} finally {
+				signal?.removeEventListener("abort", cancel);
+			}
+			if (cancelled) {
+				throw new AgentSendRefused("cancelled", `The message to "${name}" was cancelled while the agent was finishing; it was not delivered.`);
+			}
+			record = this.registry.byName(name) ?? record;
+		} else if (run !== undefined && !agentIsSettled(record.status)) {
 			if (interrupt) {
 				run.interruptWith = message;
 				await run.session.abort();
@@ -1369,23 +1589,26 @@ export class AgentRuntime {
 			else await run.session.prompt(message);
 			return { kind: "queued", record };
 		}
-		return { kind: "resumed", record: await this.#resume(record, message, toolCallId) };
+		return { kind: "resumed", record: await this.#tracked(this.#resume(record, message, toolCallId)) };
 	}
 
 	async #resume(record: AgentRecord, message: string, toolCallId: string | undefined): Promise<AgentRecord> {
+		if (this.#retiring !== undefined) throw new AgentSendRefused("retiring", `The seat is shutting down: agent "${record.name}" cannot be resumed now.`);
+		if (this.#link.state === "detached") throw new AgentSendRefused("detached", `The seat is being replaced by its continuation: agent "${record.name}" cannot be resumed until the new session attaches.`);
 		if (record.sessionFile === undefined || !existsSync(record.sessionFile)) {
 			throw new AgentSendRefused("no-transcript", `Agent "${record.name}" has no transcript on disk to resume from.`);
 		}
-		const model = this.host.resolveModel(record.model) ?? this.host.model();
+		const port = this.#port("resuming an agent");
+		const model = port.resolveModel(record.model) ?? port.model();
 		if (model === undefined) throw new AgentSendRefused("no-model", `No model to resume "${record.name}" on (${record.model}).`);
-		const sessionManager = SessionManager.open(record.sessionFile, this.host.sessionDir);
-		const type = this.host.types.find((candidate) => candidate.name === record.type);
+		const sessionManager = SessionManager.open(record.sessionFile, port.sessionDir);
+		const type = port.types.find((candidate) => candidate.name === record.type);
 		const role: AgentRole = record.type === "lead" ? "lead" : "worker";
 		const seat: EngineChildSeat = {
 			name: record.name,
 			role,
 			depth: record.depth,
-			parentSessionId: this.host.sessionId,
+			parentSessionId: port.sessionId,
 			workflowChild: record.workflowChild,
 			prompt: type?.prompt ? { kind: "own" } : { kind: "inherit" },
 		};
@@ -1404,6 +1627,8 @@ export class AgentRuntime {
 			// fresh task id was wrongly doing.
 			toolCallId,
 			status: "queued",
+			// The stop, if any, was the previous run's; a record carries only its own run's.
+			stoppedBy: undefined,
 			result: undefined,
 			error: undefined,
 			readBy: undefined,
@@ -1418,8 +1643,8 @@ export class AgentRuntime {
 		// Its own channel, not `created`: the dock's backwards guard must keep
 		// refusing a late `started` that would resurrect a settled agent, and only a
 		// channel that means "this row is alive again" can be exempt from it.
-		this.host.emit("subagents:resumed", lifecyclePayload(resumed));
-		markAgentLive(this.host.sessionId, resumed.taskId);
+		this.#emit("subagents:resumed", lifecyclePayload(resumed));
+		markAgentLive(this.#facts().sessionId, resumed.taskId);
 		const sessionRuntime = await this.#createChildRuntime({
 			sessionManager,
 			cwd: record.cwd,
@@ -1430,6 +1655,7 @@ export class AgentRuntime {
 			systemPrompt: type?.prompt || undefined,
 			seat,
 			sessionName: `${record.name}#${resumed.taskId.slice(1, 7)}`,
+			modelRuntime: port.modelRuntime,
 		});
 		await this.#start(record.name, sessionRuntime, undefined, message, undefined);
 		return this.registry.byName(record.name) ?? resumed;
@@ -1448,6 +1674,12 @@ export class AgentRuntime {
 		if (record === undefined) throw new AgentStopRefused("unknown-agent", `No agent named "${nameOrTaskId}".`);
 		const run = this.#runs.get(record.taskId);
 		if (agentIsSettled(record.status)) throw new AgentStopRefused("not-running", `Agent "${record.name}" is not running (${record.status}).`);
+		// Settling: its child has ended and its outcome is fixed. Refused at once, not after the
+		// worktree settle, which can take ~25 s and would hold a quit behind this tool call.
+		if (run?.phase.at === "settling") {
+			const { status } = run.phase.outcome;
+			throw new AgentStopRefused("not-running", `Agent "${record.name}" is not running (${status}).`, status);
+		}
 		if (run === undefined) {
 			// A record whose run lives outside this runtime — a workflow (ticket
 			// 23) — stops through the stopper it registered under its task id.
@@ -1473,15 +1705,11 @@ export class AgentRuntime {
 		}
 	}
 
-	/** Every run this runtime still holds, aborted. For session shutdown. */
-	async stopAll(by: StopCause = "shutdown"): Promise<void> {
-		await this.#stopEach(by);
-	}
-
 	/** Mark every run stopping now, synchronously, and return the aborts. */
 	#stopEach(by: StopCause): Promise<void> {
 		const aborts: Promise<void>[] = [];
 		for (const [taskId, run] of this.#runs) {
+			if (!runIsLive(run)) continue;
 			this.#markStopping(run, by);
 			// A record that is gone has no session to mark; the empty string used to
 			// go in and stay in the stopping set forever (38's finding 6).
@@ -1496,53 +1724,11 @@ export class AgentRuntime {
 	}
 }
 
-/** What a parked host took in, replayed into the host that claims the runtime. */
-interface HeldForClaim {
-	readonly records: AgentRecord[];
-	readonly logs: [string, "info" | "warning" | "error"][];
-}
-
-/**
- * The host of a parked runtime: the outgoing seat's plain facts, and none of
- * its closures. Lifecycle and progress events are dropped (`rehost` announces
- * every live run to the new dock), logs and records are held for the claim,
- * and anything that needs a live session refuses by name.
- */
-function parkedHost(outgoing: AgentRuntimeHost, held: HeldForClaim): AgentRuntimeHost {
-	const refuse = (what: string) => (): never => {
-		throw new Error(`agent runtime of session ${outgoing.sessionId} is parked for a session replacement: ${what} needs the session that claims it`);
-	};
-	return {
-		sessionId: outgoing.sessionId,
-		sessionFile: outgoing.sessionFile,
-		sessionDir: outgoing.sessionDir,
-		cwd: outgoing.cwd,
-		agentDir: outgoing.agentDir,
-		depth: outgoing.depth,
-		role: outgoing.role,
-		types: outgoing.types,
-		modelRuntime: outgoing.modelRuntime,
-		...(outgoing.now !== undefined ? { now: outgoing.now } : {}),
-		...(outgoing.sleep !== undefined ? { sleep: outgoing.sleep } : {}),
-		...(outgoing.waitBoard !== undefined ? { waitBoard: outgoing.waitBoard } : {}),
-		persist: (record) => held.records.push(record),
-		emit: () => {},
-		// Unreachable: `publishSettled`, the one caller, is closed while parked.
-		deliver: refuse("delivering a result"),
-		hasPendingInput: () => false,
-		log: (message, level) => held.logs.push([message, level]),
-		model: refuse("the seat's model"),
-		resolveModel: refuse("resolving a model"),
-		exec: refuse("running a command"),
-		childLoader: refuse("loading a child"),
-	};
-}
-
 /** Expected failures of `send`. */
 export class AgentSendRefused extends Error {
 	readonly _tag = "AgentSendRefused" as const;
 	constructor(
-		readonly reason: "unknown-agent" | "no-transcript" | "no-model",
+		readonly reason: "unknown-agent" | "no-transcript" | "no-model" | "retiring" | "detached" | "cancelled",
 		message: string,
 	) {
 		super(message);
@@ -1566,6 +1752,8 @@ export class AgentStopRefused extends Error {
 	constructor(
 		readonly reason: "unknown-agent" | "not-running",
 		message: string,
+		/** The status a settling run ended with, which its record shows only once the settle writes. */
+		readonly status?: AgentStatus,
 	) {
 		super(message);
 	}

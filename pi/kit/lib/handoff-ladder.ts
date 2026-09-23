@@ -4,9 +4,9 @@
  *
  * Three thresholds, one direction (map C13):
  *
- *   nudge   200k  a plain-text message asks for a handoff, once
- *   gate    220k  a short imperative message, once: now, and start nothing new
- *   stop    250k  the run is aborted, after the handoff is recorded
+ *   nudge   250k  a plain-text message asks for a handoff, once
+ *   gate    270k  a short imperative message, once: now, and start nothing new
+ *   stop    300k  the run is aborted, after the handoff is recorded
  *
  * The stop has one branch, ticket 51 §1: a session that reaches it from
  * `idle` crossed every threshold in a single step and was never asked, so it
@@ -44,16 +44,16 @@ export interface Thresholds {
  * with the absolute size — a 1M window does not make 600k of history cheap or
  * useful — so the limits are stated in the unit that hurts. Ticket 06 measured
  * the last 30 sessions and bracketed this number rather than fixing it: 7 of
- * 30 peaked above 150k and 4 of 30 above 250k, so a nudge at 200k sits inside
- * that tail and speaks to something like one session in five. It is a quality
- * rule, ruled by Joel on 2026-09-05, not a price derivation.
+ * 30 peaked above 150k and 4 of 30 above 250k. Joel first ruled a 200k nudge
+ * (2026-09-05), then moved it to 250k — the ladder now speaks to the top
+ * tail only. It is a quality rule, not a price derivation.
  *
  * The gate is 20k after the nudge and the stop 30k after the gate. One step —
  * a subagent's report, a large read, a long tool output — can cross either
  * gap, which is why the stop writes its own record instead of counting on a
  * turn the model may never be given (`generatedHandoff`).
  */
-export const DEFAULT_THRESHOLDS: Thresholds = { nudge: 200_000, gate: 220_000, stop: 250_000 };
+export const DEFAULT_THRESHOLDS: Thresholds = { nudge: 250_000, gate: 270_000, stop: 300_000 };
 
 /**
  * `PI_HANDOFF_THRESHOLDS="10000,20000,30000"` overrides the three limits, for
@@ -79,8 +79,8 @@ export const WINDOW_SHARE = 0.85;
 
 /**
  * The thresholds a model can actually reach — the window fit of map C18. A
- * 200k window (Haiku, the Explore agent) never sees 250k — it runs the ladder
- * at 136k / 149.6k / 170k, and only a window of 294k or more sees the three
+ * 200k window (Haiku, the Explore agent) never sees 300k — it runs the ladder
+ * at 141.7k / 153k / 170k, and only a window of 353k or more sees the three
  * numbers as written. The three numbers
  * scale down together so the stop sits at `WINDOW_SHARE` of the window and
  * the gaps keep their proportions. A window that fits the stop, or an

@@ -81,6 +81,7 @@ import {
 } from "../lib/cache-window.ts";
 import { publishPingTarget, readPingTarget, sendPing } from "../lib/ping.ts";
 import { declareSeatWorkflows } from "../lib/seat.ts";
+import { createSessionScope } from "../lib/session-scope.ts";
 import { resolveDeadlineMs } from "../lib/silence-deadline.ts";
 import { type PrefixKey, recordWarmPrefix, warmPrefixDir, withdrawRenewal } from "../lib/warm-prefix.ts";
 
@@ -240,6 +241,7 @@ function gapPingCap(deadlineMs: number): number {
 }
 
 export default function (pi: ExtensionAPI) {
+	const scope = createSessionScope(pi);
 	let mode: CacheMode = "short";
 	/** Whether this seat carries the `Workflow` tool. Decided once, before the first request. */
 	let workflows = false;
@@ -280,14 +282,12 @@ export default function (pi: ExtensionAPI) {
 	let retentionWarned = false;
 	/** A ping failed, or the window ran out. Nothing renews the cache after this. */
 	let pingsHalted = false;
-	/** The session is over. An in-flight ping must not reschedule itself past it. */
-	let shuttingDown = false;
 
 	// The two schedules keep separate timers even though no session runs both.
 	// One shared timer would let `agent_start`'s keepalive disarm silently cancel
 	// a headless seat's gap ping — a bug with no symptom until a cache bill.
-	let keepaliveTimer: ReturnType<typeof setTimeout> | undefined;
-	let gapTimer: ReturnType<typeof setTimeout> | undefined;
+	let cancelKeepalive: (() => void) | undefined;
+	let cancelGap: (() => void) | undefined;
 	/**
 	 * Whether this seat runs the gap chain: every headless seat, and the default
 	 * choice at a seat with a human at it.
@@ -494,10 +494,8 @@ export default function (pi: ExtensionAPI) {
 	// ---- the interactive keepalive chain ---------------------------------------
 
 	function stopKeepaliveTimer(): void {
-		if (keepaliveTimer) {
-			clearTimeout(keepaliveTimer);
-			keepaliveTimer = undefined;
-		}
+		cancelKeepalive?.();
+		cancelKeepalive = undefined;
 	}
 
 	/**
@@ -531,7 +529,7 @@ export default function (pi: ExtensionAPI) {
 	 */
 	function scheduleKeepalive(notify: (msg: string, level: "info" | "warning" | "error") => void, delayMs = KEEPALIVE_PING_MS): void {
 		stopKeepaliveTimer();
-		if (mode !== "keepalive" || retentionDenied || pingsHalted || busyWithOwnRequests() || shuttingDown) return;
+		if (mode !== "keepalive" || retentionDenied || pingsHalted || busyWithOwnRequests()) return;
 		if (!chainAlive()) {
 			notify("session-mode: idle for the window with nothing running — keep-alive pings stopped", "info");
 			haltPings("idle");
@@ -540,14 +538,13 @@ export default function (pi: ExtensionAPI) {
 		if (readPingTarget(sessionId) === undefined) return;
 		// A keep-warm ping may never take down the session it is warming. Nothing in
 		// either chain throws today; the catch makes that a property, not a hope.
-		keepaliveTimer = setTimeout(() => runKeepalivePing(notify).catch(() => {}), delayMs);
-		keepaliveTimer.unref?.();
+		cancelKeepalive = scope.timeout(delayMs, () => runKeepalivePing(notify).catch(() => {}));
 	}
 
 	async function runKeepalivePing(notify: (msg: string, level: "info" | "warning" | "error") => void): Promise<void> {
-		keepaliveTimer = undefined;
+		cancelKeepalive = undefined;
 		const target = readPingTarget(sessionId);
-		if (mode !== "keepalive" || retentionDenied || pingsHalted || busyWithOwnRequests() || shuttingDown || !target) return;
+		if (mode !== "keepalive" || retentionDenied || pingsHalted || busyWithOwnRequests() || !target) return;
 		if (!chainAlive()) {
 			notify("session-mode: idle for the window with nothing running — keep-alive pings stopped", "info");
 			haltPings("idle");
@@ -555,9 +552,9 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		const sentAt = now();
-		const result = await sendPing(target, PING_TIMEOUT_MS);
+		const result = await sendPing(target, PING_TIMEOUT_MS, scope.signal);
 		target.record(result);
-		if (shuttingDown) return;
+		if (scope.signal.aborted) return;
 		if (result.ok) {
 			// The ping replays the last payload verbatim, so it renews the same TTL.
 			recordWrite(sentAt, writtenTtl || LONG_TTL_MS);
@@ -584,10 +581,8 @@ export default function (pi: ExtensionAPI) {
 	// ---- the headless gap chain ------------------------------------------------
 
 	function stopGapTimer(): void {
-		if (gapTimer) {
-			clearTimeout(gapTimer);
-			gapTimer = undefined;
-		}
+		cancelGap?.();
+		cancelGap = undefined;
 	}
 
 	/** The main seat pings at 4:40, a headless seat at 4:30. */
@@ -603,7 +598,7 @@ export default function (pi: ExtensionAPI) {
 	 * stalls its payload is already captured.
 	 */
 	function armGapPing(delayMs = gapPingMs()): void {
-		if (!gapPinging || shuttingDown) return;
+		if (!gapPinging) return;
 		// A real request is proof of life and rewrites the entry anyway, so whatever
 		// stopped this chain — a shutoff Joel has walked back from, a pair of failed
 		// rounds — is over.
@@ -639,8 +634,7 @@ export default function (pi: ExtensionAPI) {
 	function scheduleGapPing(delayMs: number, attempt: number): void {
 		stopGapTimer();
 		const epoch = gapEpoch;
-		gapTimer = setTimeout(() => runGapPing(attempt, epoch).catch(() => {}), delayMs);
-		gapTimer.unref?.();
+		cancelGap = scope.timeout(delayMs, () => runGapPing(attempt, epoch).catch(() => {}));
 	}
 
 	/**
@@ -655,9 +649,9 @@ export default function (pi: ExtensionAPI) {
 	async function runGapPing(attempt: number, epoch: number): Promise<void> {
 		// Stale: a real request has re-armed since this timer was set, so the window
 		// this firing was meant to save is already fresh. Returning before touching
-		// `gapTimer` is deliberate — it now belongs to the newer round.
-		if (epoch !== gapEpoch || !gapPinging || shuttingDown) return;
-		gapTimer = undefined;
+		// `cancelGap` is deliberate — it now belongs to the newer round.
+		if (epoch !== gapEpoch || !gapPinging) return;
+		cancelGap = undefined;
 		if (!chainAlive()) return haltPings("idle");
 		// The retry belongs to the round that failed, so only a first attempt spends
 		// budget — the ceiling bounds rounds, and each round is at most two attempts.
@@ -671,11 +665,11 @@ export default function (pi: ExtensionAPI) {
 		if (target === undefined) return;
 
 		const sentAt = now();
-		const result = await sendPing(target, GAP_TIMEOUT_MS);
+		const result = await sendPing(target, GAP_TIMEOUT_MS, scope.signal);
 		target.record(result);
 		// Re-checked, not assumed: this is the far side of a network round trip, and
 		// a request, a shutdown or a whole newer round may have happened across it.
-		if (epoch !== gapEpoch || !gapPinging || shuttingDown) return;
+		if (epoch !== gapEpoch || !gapPinging || scope.signal.aborted) return;
 		const elapsed = now() - sentAt;
 		if (result.ok) {
 			recordWrite(sentAt, writtenTtl || SHORT_TTL_MS);
@@ -697,10 +691,12 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	async function askWorkflows(ui: {
-		select(title: string, options: string[]): Promise<string | undefined>;
+		select(title: string, options: string[], opts: { signal: AbortSignal }): Promise<string | undefined>;
 	}): Promise<void> {
 		// Title and message on two lines, which is how pi's own confirm lays it out.
-		const picked = await ui.select(`${WORKFLOWS_TITLE}\n${WORKFLOWS_MESSAGE}`, [...WORKFLOWS_OPTIONS]);
+		const picked = await ui.select(`${WORKFLOWS_TITLE}\n${WORKFLOWS_MESSAGE}`, [...WORKFLOWS_OPTIONS], { signal: scope.signal });
+		// A session that ended with the question open answered nothing.
+		if (scope.signal.aborted) return;
 		// Escape means the default. Every answer is persisted, No included: the
 		// handoff continuation carries this entry forward (`carriedEntries`), and a
 		// seat with no entry made its successor ask again (2026-09-22).
@@ -857,9 +853,6 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", (event) => {
-		shuttingDown = true;
-		stopKeepaliveTimer();
-		stopGapTimer();
 		unwatchAgents?.();
 		unwatchAgents = undefined;
 		// A reload is not gone: it replaces every instance while the seat and the
@@ -924,6 +917,7 @@ export default function (pi: ExtensionAPI) {
 			apply(restored, false);
 		} else if (event.reason === "startup" || event.reason === "new") {
 			await askWorkflows(ctx.ui);
+			if (scope.signal.aborted) return;
 		} else {
 			// A UI seat with no record (a resume or fork of a session from before the
 			// question) writes the one it runs on, so every UI seat's file answers

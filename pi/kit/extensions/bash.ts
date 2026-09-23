@@ -15,9 +15,9 @@
  *     `exec` stops feeding pi's accumulator and resolves; pi formats the output
  *     so far as a normal result; the wrapper appends "still running, task N,
  *     log at <path>"; the process runs on, writing the same log; and its exit
- *     is delivered as a `<background-task-notification>` through
- *     `pi.sendMessage` with `{ deliverAs: "followUp", triggerTurn: true }` — so
- *     a finished command wakes an idle session and queues behind a busy one.
+ *     is delivered as a `<background-task-notification>` through the session
+ *     scope's `startTurn` — so a finished command wakes an idle session and
+ *     queues behind a busy one.
  *     `run_in_background: true` is the same move at t=0, and `ctrl+b` is the
  *     same move on demand. Claude Code's three triggers, one mechanism.
  *   - **Every run logs from the start.** stdout and stderr go to pi's `onData`
@@ -110,6 +110,7 @@ import {
 } from "../lib/bash.ts";
 import { notice } from "../lib/notice.ts";
 import { isChildSeat } from "../lib/seat.ts";
+import { createSessionScope, type SessionScope } from "../lib/session-scope.ts";
 import { jsonArgumentCoercionFor } from "../lib/tool-argument-coercion.ts";
 import { ensurePrivateDir } from "../lib/state-dir.ts";
 import { CallHeader, headerPaints } from "./transcript/header.ts";
@@ -167,6 +168,7 @@ async function sweepOrphans(pgid: number | undefined, confirmMs: number): Promis
 			}
 			return orphanNotice(count);
 		}
+		// A raw timer: killing a leftover process group must finish after the session ends; it touches no pi or ctx.
 		await new Promise((resolve) => setTimeout(resolve, Math.min(ORPHAN_POLL_MS, Math.max(confirmMs, 1))));
 	}
 	return undefined;
@@ -184,6 +186,8 @@ interface RunSpec {
 	readonly logPath: string;
 	/** False on a child seat: the timeout kills, and nothing may detach. */
 	readonly mayBackground: boolean;
+	/** Holds the run's timeout and stall clock, so neither outlives the session. */
+	readonly scope: SessionScope;
 	/** Where a run reports when it ends or stalls out of the foreground. */
 	readonly onSettled: (run: Run, exitCode: number | null, signal: NodeJS.Signals | null) => void;
 	readonly onStalled: (run: Run, tail: string) => void;
@@ -212,9 +216,9 @@ class Run {
 	#outcome: { code: number | null; signal: NodeJS.Signals | null; error: Error | undefined } | undefined;
 	#onData: ExecOptions["onData"] | undefined;
 	#settle: ((result: ExecResult | Error) => void) | undefined;
-	#timeout: ReturnType<typeof setTimeout> | undefined;
+	#cancelTimeout: (() => void) | undefined;
 	#grace: ReturnType<typeof setTimeout> | undefined;
-	#stall: ReturnType<typeof setInterval> | undefined;
+	#cancelStall: (() => void) | undefined;
 	#lastGrowthAt = 0;
 	#lastSize = 0;
 	#stallNotified = false;
@@ -285,14 +289,14 @@ class Run {
 
 			this.#timeoutSec = options.timeout;
 			if (options.timeout !== undefined) {
-				this.#timeout = setTimeout(() => {
-					this.#timeout = undefined;
+				this.#cancelTimeout = this.#spec.scope.timeout(options.timeout * 1000, () => {
+					this.#cancelTimeout = undefined;
 					if (this.#spec.mayBackground) this.detach("timeout");
 					else {
 						this.#timedOut = true;
 						this.kill();
 					}
-				}, options.timeout * 1000);
+				});
 			}
 		});
 
@@ -307,8 +311,7 @@ class Run {
 		this.#clearTimeout();
 		this.#lastGrowthAt = Date.now();
 		this.#lastSize = this.#size();
-		this.#stall = setInterval(() => this.#checkStall(), STALL_CHECK_INTERVAL_MS);
-		this.#stall.unref?.();
+		this.#cancelStall = this.#spec.scope.interval(STALL_CHECK_INTERVAL_MS, () => this.#checkStall());
 		this.#settle({ exitCode: 0 });
 		return true;
 	}
@@ -343,8 +346,8 @@ class Run {
 		this.#exited = true;
 		this.#outcome = { code, signal, error };
 		this.#clearTimeout();
-		if (this.#stall !== undefined) clearInterval(this.#stall);
-		this.#stall = undefined;
+		this.#cancelStall?.();
+		this.#cancelStall = undefined;
 		this.#armGrace();
 	}
 
@@ -355,6 +358,7 @@ class Run {
 	 */
 	#armGrace(): void {
 		if (this.#grace !== undefined) clearTimeout(this.#grace);
+		// A raw timer: a run shutdown killed still closes its pipes and log; `settled` then drops it before any pi call.
 		this.#grace = setTimeout(() => this.#finish(), EXIT_STDIO_GRACE_MS);
 	}
 
@@ -392,8 +396,8 @@ class Run {
 	}
 
 	#clearTimeout(): void {
-		if (this.#timeout !== undefined) clearTimeout(this.#timeout);
-		this.#timeout = undefined;
+		this.#cancelTimeout?.();
+		this.#cancelTimeout = undefined;
 	}
 
 	#size(): number {
@@ -487,10 +491,10 @@ function renderNotice(message: { details?: unknown }, options: { expanded: boole
 }
 
 export default function bash(pi: ExtensionAPI) {
+	const scope = createSessionScope(pi);
 	const runs = new Map<number, Run>();
 	let seat: "main" | "child" | undefined;
 	let nextId = 1;
-	let shuttingDown = false;
 
 	/** pi's definition, for the prompt metadata an override does not inherit, and its renderers. */
 	const vanilla = createBashToolDefinition(process.cwd());
@@ -555,6 +559,7 @@ export default function bash(pi: ExtensionAPI) {
 			command: params.command,
 			logPath: logPathFor(dir, ctx.sessionManager.getSessionId(), id),
 			mayBackground: !child,
+			scope,
 			onSettled: settled,
 			onStalled: stalled,
 		});
@@ -609,7 +614,9 @@ export default function bash(pi: ExtensionAPI) {
 			}
 			return;
 		}
-		if (shuttingDown) return;
+		// A background run that ends after the scopes close and before this file's own
+		// shutdown handler clears `runs` (quit's settle wait, say) reports to no one.
+		if (scope.signal.aborted) return;
 		const task: SettledTask = {
 			id: run.id,
 			command: run.command,
@@ -624,18 +631,16 @@ export default function bash(pi: ExtensionAPI) {
 	}
 
 	function stalled(run: Run, tail: string): void {
-		if (shuttingDown) return;
 		notify(stallNotice(run, tail, run.pid), { id: run.id, command: run.command, logPath: run.logPath, stalled: true }, `task ${run.id}: stalled — ${run.command}`);
 	}
 
 	function notify(content: string, details: NoticeDetails, label: string): void {
 		try {
-			pi.sendMessage(
-				{ customType: BACKGROUND_NOTIFICATION, content, display: true, details },
-				// Triggers a turn when the session is idle, queues behind the current
-				// one when it is not.
-				{ deliverAs: "followUp", triggerTurn: true },
-			);
+			const message = { customType: BACKGROUND_NOTIFICATION, content, display: true, details };
+			// Refused before this runtime's first user turn or while a user prompt starts:
+			// appended, so the model reads it on its next turn. Limit: an idle session is
+			// not woken.
+			if (!scope.startTurn(message, { deliverAs: "followUp" })) pi.sendMessage(message, { triggerTurn: false });
 		} catch (error) {
 			notice(undefined, `bash: ${label} — could not notify: ${error instanceof Error ? error.message : String(error)}`, "error");
 		}
@@ -668,7 +673,6 @@ export default function bash(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", () => {
-		shuttingDown = true;
 		for (const run of runs.values()) run.kill();
 		runs.clear();
 	});

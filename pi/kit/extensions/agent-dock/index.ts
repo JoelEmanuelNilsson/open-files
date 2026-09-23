@@ -59,6 +59,7 @@ import type { TUI } from "@earendil-works/pi-tui";
 
 import { renderAgentSpendTree } from "../../lib/agent-spend.ts";
 import { notice } from "../../lib/notice.ts";
+import { createSessionScope } from "../../lib/session-scope.ts";
 import { agentRuntimeOf } from "../../lib/agent-runtime-seam.ts";
 import { AGENT_TASK_STATUS_KEY, formatAgentTaskCount } from "../../lib/agent-task-count.ts";
 import { workflowRunsOf } from "../../lib/workflow-runs.ts";
@@ -87,6 +88,7 @@ const STOP_REPLY_TIMEOUT_MS = 5_000;
 export default function (pi: ExtensionAPI) {
 	if (!ENABLED) return;
 
+	const scope = createSessionScope(pi);
 	const registry = new AgentTaskRegistry();
 	let context: ExtensionContext | undefined;
 	/** This seat's session id, the key its `AgentRuntime` is published under. */
@@ -158,11 +160,7 @@ export default function (pi: ExtensionAPI) {
 			settled = true;
 			unsubscribe();
 			if (!registry.markStopRequested(id, false)) return;
-			if (reason && context) {
-				try {
-					context.ui.notify(`Stop refused: ${reason}`, "warning");
-				} catch {}
-			}
+			if (reason) context?.ui.notify(`Stop refused: ${reason}`, "warning");
 			repaint();
 		};
 		const unsubscribe = pi.events.on(`subagents:rpc:stop:reply:${requestId}`, (reply) => {
@@ -174,8 +172,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			abandonStop(typeof envelope?.error === "string" ? envelope.error : "no reason given");
 		});
-		const timer = setTimeout(() => abandonStop(undefined), STOP_REPLY_TIMEOUT_MS);
-		timer.unref?.();
+		scope.timeout(STOP_REPLY_TIMEOUT_MS, () => abandonStop(undefined));
 		pi.events.emit("subagents:rpc:stop", { requestId, agentId: id });
 	}
 
@@ -287,8 +284,8 @@ export default function (pi: ExtensionAPI) {
 	// session rebind, so everything this extension puts on screen is re-applied
 	// here rather than at load.
 	pi.on("session_start", (_event, sessionContext) => {
-		// Only the seat with a screen: a subagent or a `/btw` side thread runs this
-		// same file in this same process and has no dock to draw.
+		// Only the seat with a screen: a subagent runs this same file in this same
+		// process and has no dock to draw.
 		if (sessionContext.mode !== "tui") return;
 		context = sessionContext;
 		sessionId = sessionContext.sessionManager.getSessionId();
@@ -310,7 +307,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// The seat's own spend. Every assistant message, on every seat: a headless
-	// session or a `/btw` thread still costs money, and `/stats` on the seat that
+	// session still costs money, and `/stats` on the seat that
 	// ran it should say so.
 	pi.on("message_end", (event) => {
 		ownDollars += assistantCostUsd((event as { message?: unknown }).message);

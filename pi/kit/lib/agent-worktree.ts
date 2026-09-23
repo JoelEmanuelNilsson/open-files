@@ -14,11 +14,21 @@
  * returning `undefined` for every git failure — a create that fails says why.
  */
 
+import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 /** The slice of pi's `exec` a worktree needs. */
 export type WorktreeExec = (command: string, args: string[], options?: { cwd?: string; timeout?: number }) => Promise<{ code: number; stdout: string; stderr: string }>;
+
+/** Run a command as this process: `pi.exec` refuses once its session is replaced, and the agent runtime outlives its session across a handoff. */
+export const processExec: WorktreeExec = (command, args, options) =>
+	new Promise((resolve) => {
+		// No output cap, as `pi.exec` has none: execFile's default 1 MiB would kill a long `git status`.
+		execFile(command, args, { cwd: options?.cwd, timeout: options?.timeout, encoding: "utf8", maxBuffer: Number.POSITIVE_INFINITY }, (error, stdout, stderr) => {
+			resolve({ code: error === null ? 0 : typeof error.code === "number" ? error.code : 1, stdout, stderr });
+		});
+	});
 
 /** A checked-out worktree an agent works in. */
 export interface AgentWorktree {

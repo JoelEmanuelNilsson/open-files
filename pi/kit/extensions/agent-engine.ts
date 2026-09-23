@@ -28,8 +28,9 @@ import { join } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { DefaultResourceLoader, type ExtensionAPI, type ExtensionContext, getAgentDir, SessionManager } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { agentIsSettled, AgentRegistry, type AgentRecord, readAgentRegistry, AGENT_RECORD_ENTRY } from "../lib/agent-registry.ts";
-import { AGENT_NOTIFICATION_TYPE, AgentAddressRefused, type AgentNotification, AgentRuntime, AgentSendRefused, AgentSpawnRefused, AgentStopRefused, MAX_REPORT_CHARS } from "../lib/agent-runtime.ts";
+import { agentIsSettled, type AgentRecord, readAgentRegistry, AGENT_RECORD_ENTRY } from "../lib/agent-registry.ts";
+import { AGENT_NOTIFICATION_TYPE, deliveredAgentTaskIds } from "../lib/agent-notification.ts";
+import { AgentAddressRefused, type AgentNotification, type AgentProcessDeps, AgentRuntime, AgentSendRefused, AgentSpawnRefused, AgentStopRefused, MAX_REPORT_CHARS, type SeatPort } from "../lib/agent-runtime.ts";
 import { claimParkedAgentRuntime, isSessionHandoffAnnounced, parkAgentRuntime } from "../lib/agent-runtime-handover.ts";
 import { forgetAgentRuntime, publishAgentRuntime } from "../lib/agent-runtime-seam.ts";
 import { formatSpendUsd } from "../lib/agent-spend.ts";
@@ -50,10 +51,13 @@ import {
 	TASK_STOP_PARAMS,
 } from "../lib/agent-tool-text.ts";
 import { AGENT_THINKING_LEVELS, type AgentType, loadAgentTypes } from "../lib/agent-types.ts";
-import { interruptedWaitText } from "../lib/agent-wait.ts";
+import { AgentWaitBoard, interruptedWaitText } from "../lib/agent-wait.ts";
+import { processExec } from "../lib/agent-worktree.ts";
 import { newestInFamily } from "../lib/model-family.ts";
 import { notice } from "../lib/notice.ts";
 import { childSeatOf, seatCarriesWorkflows } from "../lib/seat.ts";
+import { createSessionScope } from "../lib/session-scope.ts";
+import { sideModeClaimsInput } from "../lib/side-mode.ts";
 
 /**
  * `PI_AGENT_CHILD_EXTENSIONS`: a `:`-separated list of extension paths that
@@ -158,20 +162,6 @@ function firstLine(text: string | undefined): string {
 }
 
 /**
- * The task ids whose notification the harness can *see* in this seat's session
- * file — the fact that used to be inferred from a bit set at hand-off.
- */
-function deliveredTaskIds(ctx: ExtensionContext): Set<string> {
-	const ids = new Set<string>();
-	for (const entry of ctx.sessionManager.getEntries()) {
-		if (entry.type !== "custom_message" || entry.customType !== AGENT_NOTIFICATION_TYPE) continue;
-		const text = typeof entry.content === "string" ? entry.content : entry.content.map((block) => (block.type === "text" ? block.text : "")).join("");
-		for (const match of text.matchAll(/<task-id>([^<]+)<\/task-id>/g)) ids.add(match[1] as string);
-	}
-	return ids;
-}
-
-/**
  * What a seat may truthfully say about where a taken result is, read off
  * {@link AgentRecord.readBy} rather than inferred from one bit.
  */
@@ -236,6 +226,7 @@ function resolveModelSpec(ctx: ExtensionContext, spec: string): Model<Api> | und
 }
 
 export default function agentEngine(pi: ExtensionAPI) {
+	const scope = createSessionScope(pi);
 	let runtime: AgentRuntime | undefined;
 	let sessionId = "";
 	// Read once, when the seat starts: the `Agent` description is part of the
@@ -262,53 +253,44 @@ export default function agentEngine(pi: ExtensionAPI) {
 
 	/**
 	 * The seat's runtime: a new one, or — after a handoff (map C23) — the
-	 * outgoing session's runtime re-hosted here, so the agents it holds live
+	 * outgoing session's runtime attached here, so the agents it holds live
 	 * keep running and settle into this session's registry and file.
 	 */
-	async function buildRuntime(ctx: ExtensionContext): Promise<AgentRuntime> {
+	function buildRuntime(ctx: ExtensionContext): AgentRuntime {
 		const seat = childSeatOf(sessionId);
-		const registry = new AgentRegistry((record) => pi.appendEntry(AGENT_RECORD_ENTRY, record), readAgentRegistry(ctx.sessionManager.getEntries(), sessionId).values());
-		const host = buildHost(ctx, seat);
+		const records = readAgentRegistry(ctx.sessionManager.getEntries(), sessionId).values();
+		const port: SeatPort = {
+			sessionId,
+			sessionFile: ctx.sessionManager.getSessionFile(),
+			sessionDir: ctx.sessionManager.getSessionDir(),
+			depth: seat?.depth ?? 0,
+			role: seat?.role ?? "main",
+			types,
+			model: () => ctx.model,
+			resolveModel: (spec) => resolveModelSpec(ctx, spec),
+			modelRuntime: (ctx.modelRegistry as unknown as { runtime?: unknown }).runtime,
+			persist: (record) => pi.appendEntry(AGENT_RECORD_ENTRY, record),
+			emit: (channel, payload) => pi.events.emit(channel, payload),
+			deliver,
+			hasPendingInput: () => ctx.hasPendingMessages(),
+			log: (message, level) => notice(ctx, message, level),
+		};
 		const parked = claimParkedAgentRuntime(ctx.sessionManager.getSessionFile());
-		if (parked === undefined) return new AgentRuntime(host, registry);
-		await parked.rehost(host, registry);
-		return parked;
+		if (parked !== undefined) {
+			parked.attach(port, records);
+			return parked;
+		}
+		const deps: AgentProcessDeps = { cwd: ctx.cwd, agentDir: getAgentDir(), exec: processExec, childLoader, waitBoard: new AgentWaitBoard() };
+		return new AgentRuntime(deps, port, records);
 	}
 
-	function buildHost(ctx: ExtensionContext, seat: ReturnType<typeof childSeatOf>): ConstructorParameters<typeof AgentRuntime>[0] {
-		return (
-			{
-				sessionId,
-				sessionFile: ctx.sessionManager.getSessionFile(),
-				sessionDir: ctx.sessionManager.getSessionDir(),
-				cwd: ctx.cwd,
-				agentDir: getAgentDir(),
-				depth: seat?.depth ?? 0,
-				role: seat?.role ?? "main",
-				types,
-				model: () => ctx.model,
-				resolveModel: (spec) => resolveModelSpec(ctx, spec),
-				modelRuntime: (ctx.modelRegistry as unknown as { runtime?: unknown }).runtime,
-				persist: (record) => pi.appendEntry(AGENT_RECORD_ENTRY, record),
-				emit: (channel, payload) => pi.events.emit(channel, payload),
-				deliver,
-				exec: (command, args, options) => pi.exec(command, args, options),
-				hasPendingInput: () => ctx.hasPendingMessages(),
-				childLoader,
-				log: (message, level) => notice(ctx, message, level),
-			}
-		);
-	}
-
-	// Ticket 09's whole delivery mechanism, in one call: pi's `isStreaming`
-	// decides which of the two shapes this is, so the kit never asks whether the
-	// seat is busy. Mid-turn the message is a follow-up the model sees at its
-	// next step; idle, it starts the turn.
-	function deliver(notification: AgentNotification): void {
-		pi.sendMessage(
-			{ customType: AGENT_NOTIFICATION_TYPE, content: notification.content, display: true, details: notification.details },
-			{ deliverAs: "followUp", triggerTurn: true },
-		);
+	// Mid-turn the message is a follow-up the model sees at its next step; idle,
+	// it starts the turn. Before this runtime's first user turn, or at shutdown,
+	// the scope refuses and the result stays unread for `takeForTurn`. Limit: it
+	// then waits for the next user turn, however long that is. Refused while a
+	// user prompt starts, it is offered again at that prompt's `agent_start`.
+	function deliver(notification: AgentNotification): boolean {
+		return scope.startTurn({ customType: AGENT_NOTIFICATION_TYPE, content: notification.content, display: true, details: notification.details }, { deliverAs: "followUp" });
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
@@ -316,7 +298,7 @@ export default function agentEngine(pi: ExtensionAPI) {
 		for (const problem of loadedTypes.problems) {
 			if (ctx.hasUI) ctx.ui.notify(`agent-engine: ${problem.source}: ${problem.reason}`, "warning");
 		}
-		runtime = await buildRuntime(ctx);
+		runtime = buildRuntime(ctx);
 		// The `Workflow` tool (ticket 23) spawns through this runtime, so its
 		// children are registry entries like any other.
 		publishAgentRuntime(sessionId, runtime);
@@ -336,7 +318,7 @@ export default function agentEngine(pi: ExtensionAPI) {
 			describedWorkflows = workflows;
 			registerAgentTool(workflows);
 		}
-		const seen = deliveredTaskIds(ctx);
+		const seen = deliveredAgentTaskIds(ctx.sessionManager.getEntries());
 		let message: { customType: string; content: string; display: boolean; details: unknown } | undefined;
 		runtime?.takeForTurn(
 			(taskId) => seen.has(taskId),
@@ -348,10 +330,16 @@ export default function agentEngine(pi: ExtensionAPI) {
 		return { message };
 	});
 
+	// A result that settled while a user prompt was starting was refused a turn
+	// after the prompt's `takeForTurn`; the run is in flight now, so it goes in as
+	// a follow-up the model sees at its next step.
+	pi.on("agent_start", () => runtime?.offerUnread());
+
 	// Joel typed while a wait was in flight: the wait returns, the message goes
-	// on as the steer pi was already queuing it as (ticket 09).
-	pi.on("input", (event) => {
-		if (event.streamingBehavior !== undefined) runtime?.interruptWaits("Joel");
+	// on as the steer pi was already queuing it as (ticket 09). A side-mode submit
+	// is addressed to the side thread, not to main, so main's waits keep running.
+	pi.on("input", (event, ctx) => {
+		if (event.streamingBehavior !== undefined && !sideModeClaimsInput(ctx.sessionManager.getSessionId(), event)) runtime?.interruptWaits("Joel");
 		return undefined;
 	});
 
@@ -359,18 +347,23 @@ export default function agentEngine(pi: ExtensionAPI) {
 	// live. Anything else — `/new`, quit, resume, fork, reload — stops them: no
 	// session that follows owns them. pi sends a handoff and `/new` the same
 	// `reason: "new"`, so only continue-session's announcement tells them apart.
-	pi.on("session_shutdown", (event) => {
+	// Retire is awaited: interactive quit exits once the shutdown handlers
+	// return, so only work awaited here writes its `stopped` record.
+	pi.on("session_shutdown", async (event) => {
 		if (runtime === undefined) return;
 		forgetAgentRuntime(sessionId);
 		if (event.reason === "new" && isSessionHandoffAnnounced(sessionId) && parkAgentRuntime(event.targetSessionFile, runtime)) return;
-		void runtime.retire("shutdown");
+		await runtime.retire("shutdown");
 	});
 
 	// The dock's stop button (ticket 05 §6): reply on the request's own channel.
+	// A stop can outlast the session; the dock that asked closed with it.
 	pi.events.on("subagents:rpc:stop", (payload) => {
 		const request = payload as { requestId?: unknown; agentId?: unknown } | null;
 		if (typeof request?.requestId !== "string" || typeof request.agentId !== "string") return;
-		const reply = (envelope: { success: true } | { success: false; error: string }) => pi.events.emit(`subagents:rpc:stop:reply:${request.requestId}`, envelope);
+		const reply = (envelope: { success: true } | { success: false; error: string }) => {
+			if (!scope.signal.aborted) pi.events.emit(`subagents:rpc:stop:reply:${request.requestId}`, envelope);
+		};
 		if (runtime === undefined) {
 			reply({ success: false, error: "Agent not found" });
 			return;
@@ -452,12 +445,12 @@ export default function agentEngine(pi: ExtensionAPI) {
 		description: SEND_MESSAGE_DESCRIPTION,
 		parameters: sendMessageParams,
 		prepareArguments: jsonArgumentCoercionFor(sendMessageParams),
-		async execute(toolCallId, params) {
+		async execute(toolCallId, params, signal) {
 			if (runtime === undefined) return refuse("Agent engine is not ready: no session yet.");
 			try {
 				// The resumed run's notification carries *this* call's id, so a new
 				// result is never mistaken for a redelivery of the first run's.
-				const sent = await runtime.send(params.to, params.message, params.interrupt === true, toolCallId);
+				const sent = await runtime.send(params.to, params.message, params.interrupt === true, toolCallId, signal);
 				const text =
 					sent.kind === "queued"
 						? `Sent to ${sent.record.name}; it reads the message at its next step.`
@@ -526,8 +519,10 @@ export default function agentEngine(pi: ExtensionAPI) {
 			if (wait.outcome.kind === "interrupted") lines.push(interruptedWaitText(wait.outcome.by, wait.done, wait.of));
 			if (wait.outcome.kind === "timeout") lines.push(`timed out — ${wait.done} of ${wait.of} done`);
 			// Taken on the path that prints it: `takeUnread` marks the results read
-			// only after their text is in the reply (C7).
-			const batch = runtime.takeUnread(names.length > 0 ? names : undefined, (notification) => lines.push(notification.content), "tool");
+			// while this hand runs and keeps the mark only when it returns (C7).
+			const batch = runtime.takeUnread(names.length > 0 ? names : undefined, (notification) => {
+				lines.push(notification.content);
+			}, "tool");
 			const still = names.length > 0 ? names.filter((name) => !agentIsSettled(runtime?.registry.byName(name)?.status ?? "completed")) : runtime.registry.live().map((record) => record.name);
 			if (batch === undefined && still.length > 0) lines.push(`Still running: ${still.join(", ")}.`);
 			// "Nothing" must mean nothing. A result read once (C7) is still a fact
@@ -571,7 +566,7 @@ export default function agentEngine(pi: ExtensionAPI) {
 			} catch (error) {
 				if (error instanceof AgentStopRefused && error.reason === "not-running") {
 					const ended = runtime.registry.byName(params.name) ?? runtime.registry.byTaskId(params.name);
-					if (ended !== undefined) return refuse(endedAgentStopText(ended, Date.now()));
+					if (ended !== undefined) return refuse(endedAgentStopText(error.status === undefined ? ended : { ...ended, status: error.status }, Date.now()));
 				}
 				if (error instanceof AgentStopRefused || error instanceof AgentAddressRefused) return refuse(error.message);
 				throw error;

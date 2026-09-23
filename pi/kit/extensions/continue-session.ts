@@ -64,8 +64,8 @@
  * engine hands its live runs across the switch (`extensions/agent-engine.ts`),
  * so a worker mid-job is neither stopped nor lost.
  *
- * `/handoff` asks for the document now, in the gate's words, and does start
- * a turn: that one is Joel's request, not the ladder's.
+ * `/handoff` asks for the document now, in the gate's words, as Joel's own
+ * message: that turn is his request, not the ladder's.
  *
  * Stated limits: a prompt the user queued while the document was being
  * written is answered in the old session before the switch; background bash
@@ -81,14 +81,14 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { CallHeader, headerPaints } from "./transcript/header.ts";
 import { transcriptEnabled } from "./transcript/row.ts";
+import { deliveredAgentTaskIds } from "../lib/agent-notification.ts";
 import { announceSessionHandoff } from "../lib/agent-runtime-handover.ts";
 import { agentFactsFromEntries, backgroundTasksFromEntries, type CarriedEntry, carriedEntries, continueSessionMessage, filesFromEntries, generatedHandoff, GENERATED_HANDOFF_ENTRY, handoffDocumentOf, HANDOFF_SEAT_ENTRY, markContextStop, renderHandoffBlock, seatCarryWarning, type SeatSnapshot, type SessionEntryShape } from "../lib/continue-session.ts";
 import { contextTokens, fitThresholds, k, ladderStep, lastRequestTokens, lastTurnText, nudgeDelivery, nudgeText, type Phase, stopText, type Thresholds, thresholdsFrom } from "../lib/handoff-ladder.ts";
 import { notice } from "../lib/notice.ts";
-import { capturePromptOptions } from "../lib/prompt-capture.ts";
 import { childSeatOf } from "../lib/seat.ts";
+import { createSessionScope } from "../lib/session-scope.ts";
 import { shared } from "../lib/shared.ts";
-import { isSideSession } from "../lib/side-flag.ts";
 
 /** The command the settle handler invokes to reach `ctx.newSession`; typed by hand it does the same. */
 export const CONTINUE_COMMAND = "handoff-continue";
@@ -123,9 +123,6 @@ const SEAT_CONTROLS_SEAM = "__piKitSeatControls";
  */
 const seatControls = (): Map<string, SeatControls> => shared(SEAT_CONTROLS_SEAM, () => new Map<string, SeatControls>());
 
-/** How long the carry waits for the successor's own instance to register, before it gives up and says so. */
-const SEAT_CONTROLS_WAIT_MS = 2_000;
-
 const seatSnapshot = (model: Model<Api> | undefined, thinking: string): SeatSnapshot => ({ model: model === undefined ? null : `${model.provider}/${model.id}`, thinking });
 
 /**
@@ -151,13 +148,13 @@ function renderNudge(message: { content?: unknown }, options: { expanded: boolea
 interface Continuation {
 	readonly oldSessionFile: string | undefined;
 	readonly oldSessionId: string;
-	/** The old session's entries, as plain objects, for the registry copy. */
-	readonly entries: ReadonlyArray<{ type: string; customType?: string; data?: unknown }>;
+	/** Task ids whose result notification the old file held when the continuation was decided. */
+	readonly answered: ReadonlySet<string>;
 	readonly firstMessage: string;
 }
 
 export default function continueSession(pi: ExtensionAPI) {
-	if (isSideSession()) return;
+	const scope = createSessionScope(pi);
 
 	const configured = thresholdsFrom(process.env.PI_HANDOFF_THRESHOLDS);
 	let phase: Phase = "idle";
@@ -169,10 +166,16 @@ export default function continueSession(pi: ExtensionAPI) {
 	 * this flag and stops the run. One boolean, no recursion.
 	 */
 	let lastTurnGranted = false;
-	/** The handoff document of this session's latest turn, waiting for the run to settle. */
-	let pendingDocument: string | undefined;
+	/**
+	 * The handoff document of this session's latest turn, waiting for the run to
+	 * settle, with the results answered when it was written: a result filed by a
+	 * later turn of the run, one Esc or an error may kill, is not known answered.
+	 */
+	let pendingDocument: { readonly text: string; readonly answered: ReadonlySet<string> } | undefined;
 	/** What the command switches to; set by the settle handler, consumed by the command. */
 	let continuation: Continuation | undefined;
+	/** `/handoff`'s message, until the model's context receives it. */
+	let ask: { text: string; tokens: number } | undefined;
 
 	const notify = (ctx: ExtensionContext, text: string, kind: "info" | "warning" | "error") => notice(ctx, text, kind);
 
@@ -231,9 +234,11 @@ export default function continueSession(pi: ExtensionAPI) {
 		continuation = {
 			oldSessionFile,
 			oldSessionId,
-			entries,
+			answered: deliveredAgentTaskIds(entries),
 			firstMessage: continueSessionMessage({ oldSessionFile: oldSessionFile ?? "(not on disk)", document, block: inFlightBlock(entries, oldSessionId), recallCommand: RECALL }),
 		};
+		// Until the next run: without the hold a result would start a turn in a full context. It waits for the successor, or for Joel's next prompt.
+		scope.holdTurnsForSwitch();
 		// C13 — "nothing continues until a human decides" — assumes a human, and a
 		// child seat has none. Ruled 2026-09-05 (ticket 51 §3): still no. A child
 		// that continued itself would spend a fresh window on a document nobody
@@ -253,11 +258,12 @@ export default function continueSession(pi: ExtensionAPI) {
 	 * one step crossed every threshold and the model was never given a turn in
 	 * which it could write anything. It gets exactly one, steered so it costs the
 	 * request that turn makes and nothing else; a session that heard the gate and
-	 * ignored it does not get a third word.
+	 * ignored it does not get a third word. False when the scope refuses the
+	 * turn (shutting down); the stop then follows at once.
 	 */
-	const grantLastTurn = (tokens: number, thresholds: Thresholds) => {
-		lastTurnGranted = true;
-		pi.sendMessage({ customType: NUDGE_MESSAGE_TYPE, content: lastTurnText(tokens, thresholds), display: true }, { deliverAs: "steer", triggerTurn: true });
+	const grantLastTurn = (tokens: number, thresholds: Thresholds): boolean => {
+		lastTurnGranted = scope.startTurn({ customType: NUDGE_MESSAGE_TYPE, content: lastTurnText(tokens, thresholds), display: true }, { deliverAs: "steer" });
+		return lastTurnGranted;
 	};
 
 	// Same switch as the transcript's own rows: `PI_TRANSCRIPT=off` gives the
@@ -266,12 +272,12 @@ export default function continueSession(pi: ExtensionAPI) {
 
 	pi.on("turn_end", (event, ctx) => {
 		const document = handoffDocumentOf(event.message);
-		if (document !== undefined) pendingDocument = document;
+		if (document !== undefined) pendingDocument = { text: document, answered: deliveredAgentTaskIds(ctx.sessionManager.getEntries()) };
 		// The granted turn is over. Whatever it did — document, tool call, overflow,
 		// error — the handoff and the abort follow unconditionally.
 		if (lastTurnGranted) {
 			lastTurnGranted = false;
-			const written = pendingDocument;
+			const written = pendingDocument?.text;
 			pendingDocument = undefined;
 			const measured = measure(ctx);
 			stop(ctx, { tokens: measured.tokens ?? 0, thresholds: measured.thresholds, previous: "idle", written, granted: true });
@@ -288,8 +294,8 @@ export default function continueSession(pi: ExtensionAPI) {
 		// exactly once however many turns end above it.
 		if (phase === "stopped") {
 			if (previous === "stopped") return;
-			if (previous === "idle") grantLastTurn(size, thresholds);
-			else stop(ctx, { tokens: size, thresholds, previous, written: undefined, granted: false });
+			if (previous === "idle" && grantLastTurn(size, thresholds)) return;
+			stop(ctx, { tokens: size, thresholds, previous, written: undefined, granted: false });
 			return;
 		}
 		if (step.inject === undefined) return;
@@ -301,7 +307,7 @@ export default function continueSession(pi: ExtensionAPI) {
 
 	pi.on("agent_settled", (_event, ctx) => {
 		if (pendingDocument === undefined || continuation !== undefined) return;
-		const document = pendingDocument;
+		const { text: document, answered } = pendingDocument;
 		pendingDocument = undefined;
 		const oldSessionFile = ctx.sessionManager.getSessionFile();
 		const oldSessionId = ctx.sessionManager.getSessionId();
@@ -310,30 +316,17 @@ export default function continueSession(pi: ExtensionAPI) {
 		continuation = {
 			oldSessionFile,
 			oldSessionId,
-			entries,
+			answered,
 			firstMessage: continueSessionMessage({ oldSessionFile: oldSessionFile ?? "(not on disk)", document, block, recallCommand: RECALL }),
 		};
+		// From here no scope starts a turn in this session: one pi deferred behind
+		// this settle would run after the switch's abort, in the session it leaves.
+		scope.holdTurnsForSwitch();
 		// One macrotask later: every settle handler in the process has run
 		// against a session that still exists. The command is where pi hands an
-		// extension `newSession`.
-		setTimeout(() => pi.sendUserMessage(`/${CONTINUE_COMMAND}`, { expandPromptTemplates: true }), 0);
+		// extension `newSession`. A quit in that macrotask clears it with the scope.
+		scope.timeout(0, () => pi.sendUserMessage(`/${CONTINUE_COMMAND}`, { expandPromptTemplates: true }));
 	});
-
-	/**
-	 * The successor's controls. pi registers them before `withSession` runs
-	 * (`finishSessionReplacement` rebinds the extensions, which fires
-	 * `session_start`, and only then calls `withSession`), so the wait is for the
-	 * case where that order does not hold: a bounded delay beats a silent skip.
-	 */
-	const controlsFor = async (sessionId: string): Promise<SeatControls | undefined> => {
-		const deadline = Date.now() + SEAT_CONTROLS_WAIT_MS;
-		for (;;) {
-			const controls = seatControls().get(sessionId);
-			if (controls !== undefined) return controls;
-			if (Date.now() >= deadline) return undefined;
-			await new Promise((resolve) => setTimeout(resolve, 10));
-		}
-	};
 
 	/**
 	 * The successor continues as the same seat: same model, same thinking level.
@@ -343,7 +336,9 @@ export default function continueSession(pi: ExtensionAPI) {
 	 */
 	const carrySeat = async (fresh: ExtensionContext, model: Model<Api> | undefined, thinking: ThinkingLevel) => {
 		const wanted = seatSnapshot(model, thinking);
-		const controls = await controlsFor(fresh.sessionManager.getSessionId());
+		// pi's `finishSessionReplacement` rebinds the extensions, whose `session_start`
+		// registers these, before it calls `withSession`; a successor already shut down has none.
+		const controls = seatControls().get(fresh.sessionManager.getSessionId());
 		const finish = (reason: string | undefined) => {
 			const got = seatSnapshot(fresh.model, fresh.thinkingLevel ?? "an unknown level");
 			const carried = reason === undefined && got.model === wanted.model && got.thinking === wanted.thinking;
@@ -357,7 +352,7 @@ export default function continueSession(pi: ExtensionAPI) {
 			if (!carried) notify(fresh, seatCarryWarning({ wanted, got, reason: reason ?? "the new session did not take them" }), "warning");
 		};
 		if (model === undefined) return finish("the seat's own model was not known when the handoff ran");
-		if (controls === undefined) return finish(`the continuation's session registered no model controls within ${SEAT_CONTROLS_WAIT_MS}ms`);
+		if (controls === undefined) return finish("the continuation's session registered no model controls");
 		if (!(await controls.setModel(model))) return finish("there is no API key for that model");
 		controls.setThinkingLevel(thinking);
 		finish(undefined);
@@ -377,20 +372,21 @@ export default function continueSession(pi: ExtensionAPI) {
 			const seatModel = ctx.model;
 			const seatThinking = pi.getThinkingLevel();
 			const carried: CarriedEntry[] = [];
+			// Read in `setup`, after the old session's last write: a run that settled
+			// after the document is carried settled. Limit: the block in the first
+			// message still says what was in flight when the document was written.
+			const outgoing = ctx.sessionManager;
 			const withdrawHandoff = announceSessionHandoff(ctx.sessionManager.getSessionId());
 			const result = await ctx.newSession({
 				...(next.oldSessionFile !== undefined ? { parentSession: next.oldSessionFile } : {}),
 				setup: async (sessionManager) => {
-					for (const entry of carriedEntries(next.entries, next.oldSessionId, sessionManager.getSessionId())) {
+					for (const entry of carriedEntries(outgoing.getEntries(), next.oldSessionId, sessionManager.getSessionId(), next.answered)) {
 						sessionManager.appendCustomEntry(entry.customType, entry.data);
 						carried.push(entry);
 					}
 				},
 				withSession: async (fresh) => {
 					await carrySeat(fresh, seatModel, seatThinking);
-					// As `/handoff` does: whatever turn comes first in the new session, `wire`
-					// has this seat's options, not a declared absence.
-					capturePromptOptions(fresh.sessionManager.getSessionId(), fresh.getSystemPromptOptions());
 					// Not awaited: the first turn belongs to the new session, and the
 					// switch is complete once it has been asked for.
 					void fresh.sendUserMessage(next.firstMessage).catch((error: unknown) => {
@@ -409,20 +405,28 @@ export default function continueSession(pi: ExtensionAPI) {
 		description: "Ask the model to write its handoff now; the session continues from it in a linked new session",
 		handler: async (_args, ctx) => {
 			const { tokens, thresholds } = measure(ctx);
-			// The nudge below starts a turn without a user message, and pi hands out
-			// prompt options only on the user path (`before_agent_start`). On the first
-			// turn of a process — a resume, or /handoff typed at launch — nothing has
-			// captured them, and `wire` refuses a request it cannot build a prompt for.
-			// A command handler is the one context that can ask pi directly, so it does,
-			// before the turn exists. Any future command that triggers a turn owes the
-			// same line.
-			capturePromptOptions(ctx.sessionManager.getSessionId(), ctx.getSystemPromptOptions());
-			// Joel asking counts as the soft limit having been said, so the ladder
-			// does not say it again; the gate at its own threshold still will.
-			if (phase === "idle") phase = "nudged";
-			pi.sendMessage({ customType: NUDGE_MESSAGE_TYPE, content: nudgeText("gated", tokens ?? 0, thresholds), display: true }, { deliverAs: "steer", triggerTurn: true });
-			notify(ctx, `handoff: asked for the document at ${k(tokens ?? 0)}.`, "info");
+			ask = { text: nudgeText("gated", tokens ?? 0, thresholds), tokens: tokens ?? 0 };
+			// A user message, so the turn runs `before_agent_start` like any other; pi
+			// reads `deliverAs` only while a run is in flight, which is when it steers.
+			// That steer runs the engine's `input` handler too, so `/handoff` also
+			// interrupts a `TaskOutput` wait in flight, as Joel typing would.
+			pi.sendUserMessage(ask.text, { deliverAs: "steer" });
 		},
+	});
+
+	// `sendUserMessage` returns nothing, and pi can refuse the ask (compaction, no
+	// model or key) or drop its queued steer (an abort). pi emits `message_start`
+	// for a user message only as the run takes it in, idle prompt or injected steer.
+	pi.on("message_start", (event, ctx) => {
+		if (ask === undefined || event.message.role !== "user") return;
+		const content = event.message.content;
+		const text = typeof content === "string" ? content : content.map((part) => (part.type === "text" ? part.text : "")).join("");
+		if (text !== ask.text) return;
+		// Joel asking counts as the soft limit having been said, so the ladder
+		// does not say it again; the gate at its own threshold still will.
+		if (phase === "idle") phase = "nudged";
+		notify(ctx, `handoff: asked for the document at ${k(ask.tokens)}.`, "info");
+		ask = undefined;
 	});
 
 	pi.on("session_shutdown", (_event, ctx) => {
@@ -435,5 +439,6 @@ export default function continueSession(pi: ExtensionAPI) {
 		lastTurnGranted = false;
 		pendingDocument = undefined;
 		continuation = undefined;
+		ask = undefined;
 	});
 }

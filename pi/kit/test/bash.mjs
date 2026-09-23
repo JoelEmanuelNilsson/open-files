@@ -151,15 +151,17 @@ const mod = await jiti.import(`${ROOT}/extensions/bash.ts`);
  * is `<session>-<id>`, so a shared id would have two seats writing one file.
  */
 let seats = 0;
-function seat({ customPrompt } = {}) {
+function seat({ customPrompt, primed = true } = {}) {
 	const handlers = new Map();
 	const tools = [];
 	const shortcuts = new Map();
 	const renderers = new Map();
 	const sent = [];
 	const sessionId = `session-${++seats}`;
+	const listeners = new Map();
 	mod.default({
-		on: (e, h) => handlers.set(e, h),
+		on: (e, h) => handlers.set(e, [...(handlers.get(e) ?? []), h]),
+		events: { on: (channel, h) => { listeners.set(channel, [...(listeners.get(channel) ?? []), h]); return () => {}; }, emit: (channel, data) => { for (const h of listeners.get(channel) ?? []) h(data); } },
 		registerTool: (tool) => tools.push(tool),
 		registerShortcut: (key, options) => shortcuts.set(key, options),
 		registerMessageRenderer: (type, render) => renderers.set(type, render),
@@ -168,7 +170,8 @@ function seat({ customPrompt } = {}) {
 	const ctx = { cwd: REPO, sessionManager: { getSessionId: () => sessionId, getSessionFile: () => undefined } };
 	// The seat is decided at turn start from the options *and* the engine's seat
 	// seam, which is keyed by session id — so the handler needs the context.
-	handlers.get("before_agent_start")({ systemPromptOptions: { cwd: REPO, ...(customPrompt ? { customPrompt } : {}) } }, ctx);
+	const fire = (e, event) => { for (const h of handlers.get(e) ?? []) h(event, ctx); };
+	if (primed) fire("before_agent_start", { systemPromptOptions: { cwd: REPO, ...(customPrompt ? { customPrompt } : {}) } });
 	const tool = () => tools[tools.length - 1];
 	let calls = 0;
 	return {
@@ -176,7 +179,7 @@ function seat({ customPrompt } = {}) {
 		tool,
 		run: (params, { signal, onUpdate } = {}) => tool().execute(`call-${++calls}`, params, signal, onUpdate, ctx),
 		background: () => shortcuts.get("ctrl+b").handler({ ui: { notify: (m) => sent.push({ toast: m }) } }),
-		shutdown: () => handlers.get("session_shutdown")({}, ctx),
+		shutdown: () => fire("session_shutdown", {}),
 	};
 }
 const logsOf = (s) => fs.readdirSync(process.env.PI_KIT_BACKGROUND_DIR).filter((name) => name.startsWith(`${s.sessionId}-`));
@@ -187,7 +190,7 @@ const logsOf = (s) => fs.readdirSync(process.env.PI_KIT_BACKGROUND_DIR).filter((
 	check("with the one schema and description", same(s.tools[0].parameters, bashParams) && s.tools[0].description === BASH_DESCRIPTION);
 	check("and pi's prompt metadata, so the system prompt does not move", s.tools[0].promptSnippet === "Execute bash commands (ls, grep, find, etc.)" && s.tools[0].promptGuidelines?.[0]?.includes("PI_*"));
 	check("ctrl+b is bound", s.shortcuts.has("ctrl+b"));
-	check("it binds the two seams it needs and no others", [...s.handlers.keys()].sort().join(",") === "before_agent_start,session_shutdown");
+	check("it binds only its session scope's seams", [...s.handlers.keys()].sort().join(",") === "agent_settled,agent_start,before_agent_start,input,session_before_fork,session_before_switch,session_compact,session_compact_failed,session_shutdown", [...s.handlers.keys()].sort().join(","));
 
 	const hi = await s.run({ command: "echo hi; echo err >&2" });
 	check("an ordinary command returns its output", text(hi).includes("hi") && text(hi).includes("err"), text(hi));
@@ -284,6 +287,17 @@ console.log("\nbash: the timeout is a move, not a kill");
 	check("the tail has the output after the move", message.content.includes("later"), message.content);
 	check("and the log has all of it", fs.readFileSync(logPath, "utf8") === "start\nlater\n", JSON.stringify(fs.readFileSync(logPath, "utf8")));
 	check("the details carry the command and the id", message.details?.command === "echo start; sleep 0.8; echo later" && message.details?.id === 1);
+}
+
+// Before the seat's first user turn the session scope refuses a turn: the
+// notice is appended, and the model reads it when that turn comes.
+console.log("\nbash: a notice before the first turn is appended, not a turn");
+{
+	const s = seat({ primed: false });
+	await s.run({ command: "echo early", run_in_background: true });
+	const settled = await until(() => s.sent.length > 0);
+	const { message, options } = s.sent[0] ?? { message: {}, options: {} };
+	check("it arrives, without a turn", settled && message.customType === BACKGROUND_NOTIFICATION && options?.triggerTurn === false && options?.deliverAs === undefined, JSON.stringify(options));
 }
 
 // ---------------------------------------------------------------------------

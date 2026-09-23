@@ -5,23 +5,19 @@
  * pi only hands them out at turn time, on `before_agent_start` — and that
  * event fires on one path: a user message. Every ordinary turn is a user
  * message, so the dependency is invisible until something starts a turn
- * without one. `pi.sendMessage(..., { triggerTurn: true })` on an idle session
- * goes straight to `_runAgentPrompt` (pi's `agent-session.js`, no
+ * without one. A custom message that starts a turn on an idle session goes
+ * straight to `_runAgentPrompt` (pi's `agent-session.js`, no
  * `emitBeforeAgentStart`), and if that is the first turn of the process there
  * is no capture at all. On 2026-09-02 and 2026-09-06 that put pi's own prompt
  * on an Anthropic OAuth request behind the Claude Code identity block, and the
- * provider refused it as a third-party app.
+ * provider refused it as a third-party app. Such a turn now starts only
+ * through `lib/session-scope.ts`, which refuses it until `before_agent_start`
+ * has fired in the extension runtime; a missing capture is a tripwire, never
+ * patched over by priming it by hand.
  *
- * So the capture lives here rather than in a closure inside `wire`, for two
- * reasons the closure could not serve:
- *
- *   - Any holder of pi's options can fill it. Command handlers get
- *     `ctx.getSystemPromptOptions()` — pi's own accessor, exact and live — so
- *     a command that triggers a turn primes the seat before it does
- *     (`continue-session.ts`'s `/handoff`). One writer per path, one reader.
- *   - It survives an extension reload, which replaces every module instance
- *     while the seat and its conversation go on. A closure variable would take
- *     the capture with it and leave the next non-user turn with nothing.
+ * The capture lives here rather than in a closure inside `wire` because it
+ * survives an extension reload, which replaces every module instance while
+ * the seat and its conversation go on.
  *
  * Keyed by session id because a process runs many seats (children, forks,
  * continuations) whose prompts are not each other's. On `globalThis` via

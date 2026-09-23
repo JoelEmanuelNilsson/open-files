@@ -38,8 +38,20 @@ fs.writeFileSync(path.join(AGENT_DIR, "agents", "explore.md"), "---\nname: explo
 fs.writeFileSync(path.join(AGENT_DIR, "settings.json"), JSON.stringify({ compaction: { enabled: false } }));
 process.env.PI_CODING_AGENT_DIR = AGENT_DIR;
 process.env.PI_CODING_AGENT_SESSION_DIR = path.join(AGENT_DIR, "sessions");
-// Children under test load the engine and nothing else.
-process.env.PI_AGENT_CHILD_EXTENSIONS = `${ROOT}/extensions/agent-engine.ts`;
+// Children under test load the engine and a probe that records their session scopes' lives.
+const SCOPE_PROBE = path.join(AGENT_DIR, "scope-probe.ts");
+fs.writeFileSync(SCOPE_PROBE, `import { createSessionScope } from ${JSON.stringify(`${ROOT}/lib/session-scope.ts`)};
+export default function (pi) {
+	const scope = createSessionScope(pi);
+	pi.on("session_start", (_event, ctx) => {
+		const id = ctx.sessionManager.getSessionId();
+		const lives = (globalThis.__childScopes ??= { opened: new Set(), closed: new Set() });
+		lives.opened.add(id);
+		scope.signal.addEventListener("abort", () => lives.closed.add(id));
+	});
+}
+`);
+process.env.PI_AGENT_CHILD_EXTENSIONS = `${ROOT}/extensions/agent-engine.ts:${SCOPE_PROBE}`;
 
 const { createAgentSession, createEventBus, DefaultResourceLoader, ModelRuntime, SessionManager, getAgentDir } = await import(`${PI}/dist/index.js`);
 const { createAssistantMessageEventStream, getCurrentSystemPrompt, getCurrentTools } = await import(`${PI}/node_modules/@earendil-works/pi-ai/dist/index.js`);
@@ -49,6 +61,26 @@ let fail = 0;
 const check = (name, ok, extra = "") => {
 	if (ok) { pass++; console.log(`  ok   ${name}`); }
 	else { fail++; console.log(`  FAIL ${name}${extra ? `\n       ${extra}` : ""}`); }
+};
+/** The keys of a flat stub seat that are the process's, not the session's; the engine splits them the same way. */
+const PROCESS_KEYS = ["cwd", "agentDir", "exec", "childLoader", "now", "sleep"];
+/** A runtime over a flat stub seat and the records its session file would fold to. */
+async function runtimeOver(flat, records = []) {
+	const { AgentRuntime } = await jiti.import(`${ROOT}/lib/agent-runtime.ts`);
+	const { AgentWaitBoard } = await jiti.import(`${ROOT}/lib/agent-wait.ts`);
+	const deps = { cwd: "/", agentDir: AGENT_DIR, waitBoard: new AgentWaitBoard() };
+	const port = { sessionFile: undefined, sessionDir: AGENT_DIR, depth: 0, role: "main", types: [], persist: () => {}, emit: () => {}, deliver: () => false, log: () => {}, hasPendingInput: () => false };
+	for (const [key, value] of Object.entries(flat)) (PROCESS_KEYS.includes(key) ? deps : port)[key] = value;
+	return new AgentRuntime(deps, port, records);
+}
+/** A runtime's link as a holder of `runtime.host` observes it: a call that needs the session names why it cannot be made. */
+const linkOf = (runtime) => {
+	try {
+		runtime.host.model();
+		return "attached";
+	} catch (error) {
+		return /detached for a session replacement/.test(error.message) ? "detached" : /is retired/.test(error.message) ? "retired" : `attached (${error.message})`;
+	}
 };
 const trailer = () => {
 	fs.rmSync(AGENT_DIR, { recursive: true, force: true });
@@ -339,6 +371,10 @@ async function until(condition, ms = 5000) {
 	check("the tool result's details are the rows' contract", launch?.details?.status === "background" && launch.details.subagentType === "worker" && launch.details.description === "count files" && typeof launch.details.agentId === "string", JSON.stringify(launch?.details));
 	const settled = await until(() => seat.events.some((e) => e.channel === "subagents:completed"));
 	check("the child ran to completion in the background", settled);
+	// Released, the child's session shuts down, so no timer or turn of its extensions outlives it.
+	const lives = globalThis.__childScopes;
+	const closed = await until(() => lives !== undefined && lives.opened.size > 0 && [...lives.opened].every((id) => lives.closed.has(id)), 2000);
+	check("and releasing it closes its extensions' session scopes", closed, JSON.stringify({ opened: [...(lives?.opened ?? [])], closed: [...(lives?.closed ?? [])] }));
 	const [created, started, completed] = seat.events;
 	check("events: created, started, completed — same id, type, description", created?.channel === "subagents:created" && started?.channel === "subagents:started" && completed?.channel === "subagents:completed" && created.id === completed.id && created.type === "worker" && created.description === "count files", JSON.stringify(seat.events.map((e) => e.channel)));
 	check("completed carries the whole result, a status field and usage.cost.total", completed?.result === "There are 42 files." && completed.status === "completed" && typeof completed.usage?.cost?.total === "number");
@@ -599,16 +635,16 @@ async function until(condition, ms = 5000) {
 // The 2026-09-03 shape was a result consumed by a path that never printed it:
 // `TaskOutput` said nothing while `ListAgents` showed the completion. The
 // registry no longer lets anyone set `readBy` — `update` keeps the value it
-// found and `markRead` runs *after* the hand has taken the text — so the only
-// way to consume a result is to deliver it.
+// found, and a take marks its batch only around a hand that takes the text,
+// putting it back when the hand refuses or throws — so the only way to consume
+// a result is to deliver it.
 // ---------------------------------------------------------------------------
 {
 	console.log("\ntaking a result reads it exactly once");
 	const { AgentRegistry } = await jiti.import(`${ROOT}/lib/agent-registry.ts`);
-	const { AgentRuntime } = await jiti.import(`${ROOT}/lib/agent-runtime.ts`);
 	const done = { name: "pin", taskId: "a1", ownerSessionId: "seat", type: "worker", description: "d", status: "completed", depth: 1, sessionFile: undefined, sessionId: "c", cwd: "/", branch: undefined, model: "m", result: "The whole reply.", error: undefined, readBy: undefined, readAt: undefined, toolUses: 0, costUsd: 0, totalTokens: 0, outputTokens: 0, startedAt: 1, completedAt: 2, toolCallId: undefined, workflowChild: false };
-	const registry = new AgentRegistry(() => {}, [done]);
-	const runtime = new AgentRuntime({ sessionId: "seat", role: "main" }, registry);
+	const runtime = await runtimeOver({ sessionId: "seat" }, [done]);
+	const registry = runtime.registry;
 	check("registry.update cannot flip readBy — the value survives the change", registry.update("pin", { readBy: "conversation", status: "completed" })?.readBy === undefined);
 	let thrown;
 	try {
@@ -630,12 +666,42 @@ async function until(condition, ms = 5000) {
 	// harness has seen the message in the session file.
 	const two = { ...done, name: "pin2", taskId: "a2" };
 	const reg2 = new AgentRegistry(() => {}, [two]);
-	reg2.markRead("pin2", "a2", "handed", 10);
+	reg2.consume([two], "handed", 10, () => true);
 	check("a handed result is not claimed to be in any conversation", reg2.byName("pin2").readBy === "handed");
-	reg2.markRead("pin2", "a2", "conversation", 20);
+	reg2.markHandedSeen("pin2", "a2", 20);
 	check("and becomes `conversation` only on the upgrade", reg2.byName("pin2").readBy === "conversation" && reg2.byName("pin2").readAt === 20);
-	reg2.markRead("pin2", "a2", "handed", 30);
+	reg2.consume([reg2.byName("pin2")], "handed", 30, () => true);
 	check("never the other way round: the strongest claim made stands", reg2.byName("pin2").readBy === "conversation" && reg2.byName("pin2").readAt === 20);
+	const three = { ...done, name: "pin3", taskId: "a3" };
+	const reg3 = new AgentRegistry(() => {}, [three]);
+	reg3.markHandedSeen("pin3", "a3", 40);
+	check("seeing a message is no delivery: an unread result stays unread", reg3.byName("pin3").readBy === undefined);
+
+	// The mark comes first, but only a taken hand writes it: a refusal leaves the file as it was.
+	const written = [];
+	const four = { ...done, name: "pin4", taskId: "a4" };
+	const reg4 = new AgentRegistry((record) => written.push(record), [four]);
+	let seenUnread;
+	const refused = reg4.consume([four], "handed", 50, () => { seenUnread = reg4.byName("pin4").readBy; return false; });
+	check("a refused hand writes nothing: no mark-then-restore pair", refused === false && written.length === 0 && reg4.byName("pin4").readBy === undefined, `${written.length} writes`);
+	check("and the batch read as taken while the hand ran", seenUnread === "handed");
+	reg4.consume([four], "tool", 60, () => true);
+	check("a taken hand writes the mark once", written.length === 1 && written[0].readBy === "tool" && written[0].readAt === 60, JSON.stringify(written.map((r) => r.readBy)));
+	// A hand that ends in a later, valid delivery of the same run: the refusal must not undo it.
+	const five = { ...done, name: "pin5", taskId: "a5" };
+	const reg5 = new AgentRegistry(() => {}, [five]);
+	reg5.consume([five], "handed", 70, () => {
+		reg5.put({ ...reg5.byName("pin5"), readBy: undefined, readAt: undefined });
+		reg5.consume([reg5.byName("pin5")], "tool", 71, () => true);
+		return false;
+	});
+	check("a refusal restores only a record still carrying its own mark", reg5.byName("pin5").readBy === "tool" && reg5.byName("pin5").readAt === 71, `${reg5.byName("pin5").readBy}@${reg5.byName("pin5").readAt}`);
+	// A write during the hand persisted the mark; the restore must reach the file too.
+	const restored = [];
+	const six = { ...done, name: "pin6", taskId: "a6" };
+	const reg6 = new AgentRegistry((record) => restored.push(record), [six]);
+	reg6.consume([six], "handed", 80, () => { reg6.update("pin6", { toolUses: 9 }); return false; });
+	check("a mark another write persisted is restored in the file as well", reg6.byName("pin6").readBy === undefined && reg6.byName("pin6").toolUses === 9 && restored.at(-1)?.readBy === undefined && restored.at(-1)?.toolUses === 9, JSON.stringify(restored.map((r) => `${r.readBy}:${r.toolUses}`)));
 }
 
 // ---------------------------------------------------------------------------
@@ -651,8 +717,8 @@ async function until(condition, ms = 5000) {
 	const { AgentRuntime } = await jiti.import(`${ROOT}/lib/agent-runtime.ts`);
 	const record = (name, type, over = {}) => ({ name, taskId: `t-${name}`, ownerSessionId: "seat", type, description: `${name} job`, status: "running", depth: 1, sessionFile: undefined, sessionId: `s-${name}`, cwd: "/", branch: undefined, model: "m", result: undefined, error: undefined, readBy: undefined, readAt: undefined, toolUses: 0, costUsd: 0, totalTokens: 0, outputTokens: 0, startedAt: 1, completedAt: undefined, toolCallId: undefined, workflowChild: false, ...over });
 	const delivered = [];
-	const registry = new AgentRegistry(() => {});
-	const runtime = new AgentRuntime({ sessionId: "seat", role: "main", emit: () => {}, deliver: (notification) => delivered.push(notification) }, registry);
+	const runtime = await runtimeOver({ sessionId: "seat", deliver: (notification) => delivered.push(notification) });
+	const registry = runtime.registry;
 	const settle = (name, type, result) => {
 		registry.put(record(name, type, { status: "completed", result, completedAt: 2 }));
 		runtime.publishSettled(registry.byName(name));
@@ -689,9 +755,9 @@ async function until(condition, ms = 5000) {
 // settle, delivered after rehost, started a turn ahead of the continuation.
 // ---------------------------------------------------------------------------
 {
-	console.log("\na parked runtime cannot reach the session it left");
-	const { AgentRegistry } = await jiti.import(`${ROOT}/lib/agent-registry.ts`);
-	const { AgentRuntime } = await jiti.import(`${ROOT}/lib/agent-runtime.ts`);
+	console.log("\na detached runtime cannot reach the session it left");
+	const { readAgentRegistry } = await jiti.import(`${ROOT}/lib/agent-registry.ts`);
+	const { markAgentLive, liveAgentsOf } = await jiti.import(`${ROOT}/lib/agent-live-count.ts`);
 	const record = (name, over = {}) => ({ name, taskId: `t-${name}`, ownerSessionId: "old-seat", type: "worker", description: `${name} job`, status: "running", depth: 1, sessionFile: undefined, sessionId: `s-${name}`, cwd: "/", branch: undefined, model: "m", result: undefined, error: undefined, readBy: undefined, readAt: undefined, toolUses: 0, costUsd: 0, totalTokens: 0, outputTokens: 0, startedAt: 1, completedAt: undefined, toolCallId: undefined, workflowChild: false, ...over });
 	const reachedDead = [];
 	let dead = false;
@@ -702,44 +768,79 @@ async function until(condition, ms = 5000) {
 		}
 		return typeof value === "function" ? value(...args) : value;
 	};
-	const oldHost = { sessionId: "old-seat", role: "main", depth: 0, types: [], emit: touch("emit"), log: touch("log"), deliver: touch("deliver"), hasPendingInput: touch("hasPendingInput", true), model: touch("model"), resolveModel: touch("resolveModel"), exec: touch("exec"), childLoader: touch("childLoader"), persist: touch("persist") };
-	const runtime = new AgentRuntime(oldHost, new AgentRegistry(touch("registry persist"), [record("w1"), record("w2")]));
-	runtime.park();
+	const oldSeat = { sessionId: "old-seat", emit: touch("emit"), log: touch("log"), deliver: touch("deliver"), hasPendingInput: touch("hasPendingInput", true), model: touch("model"), resolveModel: touch("resolveModel"), exec: touch("exec"), childLoader: touch("childLoader"), persist: touch("persist") };
+	const runtime = await runtimeOver(oldSeat, [record("w1"), record("w2")]);
+	markAgentLive("old-seat", "t-w1");
+	markAgentLive("old-seat", "t-w2");
+	runtime.detach();
 	dead = true;
 	runtime.host.emit("subagents:progress", {});
-	runtime.host.log("said while parked", "info");
-	const pending = runtime.host.hasPendingInput();
+	runtime.host.log("said while detached", "info");
+	// The wait board's timer is unref'd; the sleep keeps the loop alive until it fires.
+	const [waited] = await Promise.all([runtime.wait(["w1"], 0), sleep(20)]);
 	let refusal = "";
 	try { runtime.host.model(); } catch (error) { refusal = error.message; }
 	runtime.registry.update("w1", { toolUses: 3 });
-	// A run the handoff did not carry: its write while parked must not make the new session hold it.
+	// A run the handoff did not carry: its write while detached must not make the new session hold it.
 	runtime.registry.put(record("w9"));
 	runtime.publishSettled(runtime.registry.put({ ...runtime.registry.byName("w2"), status: "completed", result: "w2 done", completedAt: 2 }));
-	check("no host call and no registry write reaches the outgoing session", reachedDead.length === 0, reachedDead.join(","));
-	check("pending input reads false, and a spawn-only call refuses naming the park", pending === false && refusal.includes("parked for a session replacement"), refusal);
+	check("no port call and no registry write reaches the outgoing session", reachedDead.length === 0, reachedDead.join(","));
+	check("pending input reads false, and a call that needs the session refuses naming the detach", waited.outcome.kind !== "interrupted" && refusal.includes("detached for a session replacement"), `${waited.outcome.kind}; ${refusal}`);
+	check("a settle while detached leaves its result unread", runtime.registry.byName("w2").readBy === undefined && linkOf(runtime) === "detached", `${runtime.registry.byName("w2").readBy} · ${linkOf(runtime)}`);
 	const delivered = [];
 	const said = [];
-	const newHost = { sessionId: "new-seat", role: "main", depth: 0, types: [], emit: () => {}, log: (message) => said.push(message), deliver: (n) => delivered.push(n), hasPendingInput: () => false };
+	const emitted = [];
 	const persisted = [];
-	const carried = [record("w1", { ownerSessionId: "new-seat" }), record("w2", { ownerSessionId: "new-seat" })];
-	await runtime.rehost(newHost, new AgentRegistry((r) => persisted.push(r), carried));
-	check("what was written while parked lands in the new session, under the new owner", persisted.some((r) => r.name === "w1" && r.toolUses === 3 && r.ownerSessionId === "new-seat") && persisted.some((r) => r.name === "w2" && r.status === "completed"), JSON.stringify(persisted.map((r) => `${r.name}:${r.status}:${r.ownerSessionId}`)));
-	check("a write while parked for a run the new session does not hold is not replayed into it", !persisted.some((r) => r.name === "w9") && runtime.registry.byTaskId("t-w9") === undefined, JSON.stringify(persisted.map((r) => r.name)));
-	check("and what was said while parked is said by the new host", said.includes("said while parked"), JSON.stringify(said));
-	check("a settle held across the park starts no turn before the new session's first", delivered.length === 0, String(delivered.length));
+	// The claiming session folds the carried copies, which say `running`, to `lost`.
+	const carried = readAgentRegistry([record("w1", { ownerSessionId: "new-seat" }), record("w2", { ownerSessionId: "new-seat" })].map((data) => ({ type: "custom", customType: "agent-record", data })), "new-seat").values();
+	await runtime.attach({ sessionId: "new-seat", sessionFile: undefined, sessionDir: AGENT_DIR, depth: 0, role: "main", persist: (r) => persisted.push(r), emit: (channel, payload) => emitted.push({ channel, ...payload }), log: (message) => said.push(message), deliver: (n) => delivered.push(n), hasPendingInput: () => false }, carried);
+	check("what was written while detached lands in the new session, under the new owner", persisted.some((r) => r.name === "w1" && r.toolUses === 3 && r.ownerSessionId === "new-seat") && persisted.some((r) => r.name === "w2" && r.status === "completed"), JSON.stringify(persisted.map((r) => `${r.name}:${r.status}:${r.ownerSessionId}`)));
+	check("a write while detached for a run the new session does not hold is not replayed into it", !persisted.some((r) => r.name === "w9") && runtime.registry.byTaskId("t-w9") === undefined, JSON.stringify(persisted.map((r) => r.name)));
+	check("a detached terminal record replays as terminal, never reset to running", runtime.registry.byName("w2").status === "completed" && !persisted.some((r) => r.name === "w2" && r.status === "running"), JSON.stringify(persisted.map((r) => `${r.name}:${r.status}`)));
+	check("while the live run the fold read as lost is running again, live under the new seat", runtime.registry.byName("w1").status === "running" && liveAgentsOf("new-seat").has("t-w1") && !liveAgentsOf("old-seat").has("t-w1"));
+	check("the new dock hears of both: w1 started, w2's verdict", emitted.some((e) => e.channel === "subagents:started" && e.name === "w1") && emitted.some((e) => e.channel === "subagents:completed" && e.name === "w2"), emitted.map((e) => `${e.channel}:${e.name}`).join(","));
+	check("and what was said while detached is said by the new port", said.includes("said while detached"), JSON.stringify(said));
+	check("a settle while detached starts no turn before the new session's first", delivered.length === 0, String(delivered.length));
 	const carriedIn = runtime.takeForTurn(() => false, () => {});
 	check("it rides the first turn instead (C7)", carriedIn?.content.includes("w2 done") === true, carriedIn?.content?.slice(0, 80));
+	check("and lands exactly once: the next turn carries nothing", runtime.takeForTurn(() => true, () => {}) === undefined && persisted.filter((r) => r.name === "w2" && r.status === "completed" && r.readBy === undefined).length === 1);
 	runtime.publishSettled(runtime.registry.put({ ...runtime.registry.byName("w1"), status: "completed", result: "w1 done", completedAt: 3 }));
 	check("after that first turn a settle delivers on its own again", delivered.length === 1 && delivered[0].content.includes("w1 done"), String(delivered.length));
 
 	dead = false;
 	reachedDead.length = 0;
-	const orphan = new AgentRuntime({ ...oldHost }, new AgentRegistry(touch("registry persist"), [record("w3")]));
-	orphan.park();
+	const orphan = await runtimeOver({ ...oldSeat }, [record("w3")]);
+	orphan.detach();
 	dead = true;
 	await orphan.retire("orphaned");
 	orphan.publishSettled(orphan.registry.put({ ...orphan.registry.byName("w3"), status: "stopped", completedAt: 4 }));
-	check("an unclaimed park is retired without reaching the outgoing session", reachedDead.length === 0, reachedDead.join(","));
+	check("an unclaimed detach is retired without reaching the outgoing session", reachedDead.length === 0 && linkOf(orphan) === "retired", reachedDead.join(","));
+}
+
+// ---------------------------------------------------------------------------
+// The seat's session scope refuses a turn before its first user turn and at
+// shutdown; the result must then wait, unread, for the next turn to carry it.
+// ---------------------------------------------------------------------------
+{
+	console.log("\na delivery the seat refuses");
+	const { AgentRegistry } = await jiti.import(`${ROOT}/lib/agent-registry.ts`);
+	const { AgentRuntime } = await jiti.import(`${ROOT}/lib/agent-runtime.ts`);
+	const record = (name, over = {}) => ({ name, taskId: `t-${name}`, ownerSessionId: "seat", type: "worker", description: `${name} job`, status: "running", depth: 1, sessionFile: undefined, sessionId: `s-${name}`, cwd: "/", branch: undefined, model: "m", result: undefined, error: undefined, readBy: undefined, readAt: undefined, toolUses: 0, costUsd: 0, totalTokens: 0, outputTokens: 0, startedAt: 1, completedAt: undefined, toolCallId: undefined, workflowChild: false, ...over });
+	let offered = 0;
+	const runtime = await runtimeOver({ sessionId: "seat", deliver: () => { offered++; return false; } }, [record("r1")]);
+	const registry = runtime.registry;
+	runtime.publishSettled(registry.put({ ...registry.byName("r1"), status: "completed", result: "r1 done", completedAt: 2 }));
+	check("it was offered once and stays unread", offered === 1 && registry.byName("r1").readBy === undefined, `${offered} · ${registry.byName("r1").readBy}`);
+	const carried = runtime.takeForTurn(() => false, () => {});
+	check("the next turn carries it and marks it read", carried?.content.includes("r1 done") === true && registry.byName("r1").readBy === "conversation");
+
+	// An idle seat's `sendMessage` starts the turn at once, so pi's `agent_start`
+	// handlers run inside `deliver`, before the batch is marked read.
+	let handed = 0;
+	const inner = await runtimeOver({ sessionId: "seat", deliver: () => { handed++; inner.offerUnread(); return true; } }, [record("r2")]);
+	const reentrant = inner.registry;
+	inner.publishSettled(reentrant.put({ ...reentrant.byName("r2"), status: "completed", result: "r2 done", completedAt: 2 }));
+	check("a delivery that re-offers from inside itself hands the result once", handed === 1 && reentrant.byName("r2").readBy === "handed", `${handed} · ${reentrant.byName("r2").readBy}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -1152,11 +1253,11 @@ async function until(condition, ms = 5000) {
 		childLoader: async () => { throw new Error("no child should start"); },
 		log: () => {}, sleep: async () => {},
 	});
-	const refusal = await new AgentRuntime(hostAt(1), new AgentRegistry(() => {}))
+	const refusal = await (await runtimeOver(hostAt(1)))
 		.spawn({ description: "ask the advisor", prompt: "Is this design right?", subagentType: "advisor" })
 		.then(() => "no refusal", (error) => error.message);
 	check("a child seat's advisor spawn is refused with the ruled text", refusal === ADVISOR_MAIN_THREAD_ONLY, refusal);
-	const fromMain = await new AgentRuntime(hostAt(0), new AgentRegistry(() => {}))
+	const fromMain = await (await runtimeOver(hostAt(0)))
 		.spawn({ description: "ask the advisor", prompt: "Is this design right?", subagentType: "advisor" })
 		.then(() => "spawned", (error) => error.message);
 	check("the main thread gets past the same gate", fromMain !== ADVISOR_MAIN_THREAD_ONLY, fromMain);
@@ -1170,26 +1271,31 @@ async function until(condition, ms = 5000) {
 {
 	console.log("\nany seat, any level, clamped to the model");
 	const { AgentRuntime } = await jiti.import(`${ROOT}/lib/agent-runtime.ts`);
-	const { AgentRegistry } = await jiti.import(`${ROOT}/lib/agent-registry.ts`);
+	const { AgentWaitBoard } = await jiti.import(`${ROOT}/lib/agent-wait.ts`);
 	const { liveAgentCount } = await jiti.import(`${ROOT}/lib/agent-live-count.ts`);
 	const scripted = modelRuntime.getModel("scripted", "scripted-1");
 	// Like Opus 4.7+ and Luna: every level through max. And like Opus 4.5: nothing past high.
 	const fullRange = { ...scripted, id: "scripted-1", reasoning: true, thinkingLevelMap: { xhigh: "xhigh", max: "max" } };
 	const toHigh = { ...scripted, id: "scripted-1", reasoning: true };
-	const hostOn = (model, types = []) => ({
-		sessionId: `levels-seat-${Math.random().toString(16).slice(2, 8)}`, sessionFile: undefined, sessionDir: path.join(AGENT_DIR, "sessions"), cwd: ROOT, agentDir: AGENT_DIR,
-		depth: 0, role: "main", types,
-		model: () => model, thinkingLevel: () => "off", resolveModel: () => model, modelRuntime,
-		persist: () => {}, emit: () => {}, deliver: () => {}, exec: async () => ({ code: 0, stdout: "", stderr: "" }), hasPendingInput: () => false,
-		childLoader: async ({ cwd }) => {
-			const loader = new DefaultResourceLoader({ cwd, agentDir: getAgentDir(), noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
-			await loader.reload();
-			return loader;
-		},
-		log: () => {}, sleep: async () => {},
-	});
+	const runtimeOn = (model, types = []) =>
+		new AgentRuntime(
+			{
+				cwd: ROOT, agentDir: AGENT_DIR, exec: async () => ({ code: 0, stdout: "", stderr: "" }), sleep: async () => {}, waitBoard: new AgentWaitBoard(),
+				childLoader: async ({ cwd }) => {
+					const loader = new DefaultResourceLoader({ cwd, agentDir: getAgentDir(), noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
+					await loader.reload();
+					return loader;
+				},
+			},
+			{
+				sessionId: `levels-seat-${Math.random().toString(16).slice(2, 8)}`, sessionFile: undefined, sessionDir: path.join(AGENT_DIR, "sessions"), depth: 0, role: "main", types,
+				model: () => model, resolveModel: () => model, modelRuntime,
+				persist: () => {}, emit: () => {}, deliver: () => false, log: () => {}, hasPendingInput: () => false,
+			},
+			[],
+		);
 	const lead = { name: "lead", description: "Owns work.", model: undefined, thinking: "high", prompt: "", source: "" };
-	const full = new AgentRuntime(hostOn(fullRange, [lead]), new AgentRegistry(() => {}));
+	const full = runtimeOn(fullRange, [lead]);
 	for (const level of ["low", "medium", "high", "xhigh", "max"]) {
 		const prompt = `Run at ${level}.`;
 		scriptFor(prompt, [[text(`ran at ${level}`)]]);
@@ -1202,7 +1308,7 @@ async function until(condition, ms = 5000) {
 	check("no level asked takes the type's", typeDefault.thinking === "high", typeDefault.thinking);
 	const refused = await full.spawn({ description: "x", prompt: "x", thinking: "enormous" }).then(() => "spawned", (error) => error.message);
 	check("a level that does not exist is refused, naming the ones that do", refused === 'Thinking level "enormous" does not exist. Only "low", "medium", "high", "xhigh", "max" do.', refused);
-	const narrow = new AgentRuntime(hostOn(toHigh), new AgentRegistry(() => {}));
+	const narrow = runtimeOn(toHigh);
 	const clamped = await narrow.spawn({ description: "max on a model without it", prompt: "Run past your range.", thinking: "max" });
 	check("max on a model without it is clamped to the model's top level, not refused", clamped.thinking === "high", clamped.thinking);
 	// The seat reaches all of this through the Agent tool's own parameter.
@@ -1217,7 +1323,7 @@ async function until(condition, ms = 5000) {
 	check("the Agent tool passes thinking through to the spawn", /Agent started in background/.test(started) && !/does not exist/.test(started), started);
 	await quiet(seat);
 	seat.session.dispose();
-	await Promise.all([full.stopAll(), narrow.stopAll()]);
+	await Promise.all([full.retire("shutdown"), narrow.retire("shutdown")]);
 	await until(() => liveAgentCount() === 0, 8000);
 }
 
@@ -1256,7 +1362,7 @@ async function until(condition, ms = 5000) {
 		log: () => {},
 		sleep: (ms) => new Promise((resolve) => slept.push({ ms, resolve })),
 	};
-	const runtime = new AgentRuntime(host, new AgentRegistry(() => {}));
+	const runtime = await runtimeOver(host);
 	const names = ["sib-1", "sib-2", "sib-3", "sib-4", "sib-5", "sib-6", "sib-7"];
 	for (const name of names) scriptFor(`Fan out, ${name}.`, [{ delay: 4000, content: [text(`${name} done`)] }]);
 	await runtime.spawn({ description: "first of the fan-out", prompt: `Fan out, ${names[0]}.`, name: names[0] });
@@ -1278,7 +1384,7 @@ async function until(condition, ms = 5000) {
 	check("and it prompts when its turn comes", await until(() => asked(names[1]), 5000));
 	check("the ones behind it are still waiting", !asked(names[2]));
 	for (const pending of slept) pending.resolve();
-	await runtime.stopAll();
+	await runtime.retire("shutdown");
 	await until(() => liveAgentCount() === 0, 8000);
 }
 
@@ -1320,7 +1426,7 @@ async function until(condition, ms = 5000) {
 		log: () => {},
 		sleep: (ms) => new Promise((resolve) => slept.push({ ms, resolve })),
 	};
-	const runtime = new AgentRuntime(host, new AgentRegistry(() => {}));
+	const runtime = await runtimeOver(host);
 	// One tool call, then a long silence: the first assistant message ends, so the
 	// run leaves the batch while it is still very much alive.
 	scriptFor("Work, then wait.", [[call("read", { path: `${ROOT}/package.json` })], { delay: 30000, content: [text("first done")] }]);
@@ -1331,7 +1437,7 @@ async function until(condition, ms = 5000) {
 	await runtime.spawn({ description: "second of the pair", prompt: "Come in behind it.", name: "batch-2" });
 	check("a child spawned behind it is not staggered: there is a prefix to read", slept.length === 0, JSON.stringify(slept.map((s) => s.ms)));
 	check("and it prompts at once", await until(() => requests.some((r) => lastUserText({ messages: r.messages }).includes("Come in behind it.")), 5000));
-	await runtime.stopAll();
+	await runtime.retire("shutdown");
 	await until(() => liveAgentCount() === 0, 8000);
 }
 
@@ -1343,37 +1449,39 @@ async function until(condition, ms = 5000) {
 {
 	console.log("\na child's onFirstPrompt fires as its first prompt goes out");
 	const { AgentRuntime } = await jiti.import(`${ROOT}/lib/agent-runtime.ts`);
-	const { AgentRegistry } = await jiti.import(`${ROOT}/lib/agent-registry.ts`);
+	const { AgentWaitBoard } = await jiti.import(`${ROOT}/lib/agent-wait.ts`);
 	const { liveAgentCount } = await jiti.import(`${ROOT}/lib/agent-live-count.ts`);
 	const slept = [];
 	const scripted = modelRuntime.getModel("scripted", "scripted-1");
-	const host = {
-		sessionId: "first-prompt-seat",
-		sessionFile: undefined,
-		sessionDir: path.join(AGENT_DIR, "sessions"),
+	const deps = {
 		cwd: ROOT,
 		agentDir: AGENT_DIR,
-		depth: 0,
-		role: "main",
-		types: [],
-		model: () => scripted,
-		thinkingLevel: () => "off",
-		resolveModel: () => scripted,
-		modelRuntime,
-		persist: () => {},
-		emit: () => {},
-		deliver: () => {},
 		exec: async () => ({ code: 0, stdout: "", stderr: "" }),
-		hasPendingInput: () => false,
 		childLoader: async ({ cwd }) => {
 			const loader = new DefaultResourceLoader({ cwd, agentDir: getAgentDir(), noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
 			await loader.reload();
 			return loader;
 		},
-		log: () => {},
 		sleep: (ms) => new Promise((resolve) => slept.push({ ms, resolve })),
+		waitBoard: new AgentWaitBoard(),
 	};
-	const runtime = new AgentRuntime(host, new AgentRegistry(() => {}));
+	const port = {
+		sessionId: "first-prompt-seat",
+		sessionFile: undefined,
+		sessionDir: path.join(AGENT_DIR, "sessions"),
+		depth: 0,
+		role: "main",
+		types: [],
+		model: () => scripted,
+		resolveModel: () => scripted,
+		modelRuntime,
+		persist: () => {},
+		emit: () => {},
+		deliver: () => false,
+		log: () => {},
+		hasPendingInput: () => false,
+	};
+	const runtime = new AgentRuntime(deps, port, []);
 	const asked = (prompt) => requests.some((r) => lastUserText({ messages: r.messages }).includes(prompt));
 	// Each hook call notes whether the prompt had already been sent: it must not have been.
 	const fired = [];
@@ -1392,7 +1500,7 @@ async function until(condition, ms = 5000) {
 	check("before its prompt is sent", fired.every((f) => !f.sent), JSON.stringify(fired));
 	check("and its prompt then goes out", await until(() => asked(prompts[1]), 5000));
 	for (const pending of slept) pending.resolve();
-	await runtime.stopAll();
+	await runtime.retire("shutdown");
 	await until(() => liveAgentCount() === 0, 8000);
 	check("a child stopped while held never fires it: it never started", !fired.some((f) => f.prompt === prompts[2]), JSON.stringify(fired));
 }
@@ -1406,8 +1514,8 @@ async function until(condition, ms = 5000) {
 	console.log("\na workflow's child is never this seat's to read");
 	const { AgentRuntime } = await jiti.import(`${ROOT}/lib/agent-runtime.ts`);
 	const { AgentRegistry } = await jiti.import(`${ROOT}/lib/agent-registry.ts`);
-	const registry = new AgentRegistry(() => {});
-	const runtime = new AgentRuntime({ sessionId: "unread-seat" }, registry);
+	const runtime = await runtimeOver({ sessionId: "unread-seat" });
+	const registry = runtime.registry;
 	const record = (name, extra) => ({ name, taskId: `t-${name}`, ownerSessionId: "unread-seat", type: "worker", description: "a job", status: "completed", stoppedBy: undefined, depth: 1, sessionFile: undefined, sessionId: `s-${name}`, cwd: ROOT, branch: undefined, model: "scripted/scripted-1", result: "done", error: undefined, readBy: undefined, readAt: undefined, toolUses: 0, costUsd: 0, totalTokens: 0, outputTokens: 0, startedAt: 1, completedAt: 2, toolCallId: undefined, workflowChild: false, ...extra });
 	registry.put(record("ordinary"));
 	registry.put(record("workflow-child", { workflowChild: true }));
@@ -1573,8 +1681,8 @@ async function until(condition, ms = 5000) {
 	const { AgentRuntime } = await jiti.import(`${ROOT}/lib/agent-runtime.ts`);
 	let clock = 1_000_000;
 	const delivered = [];
-	const registry = new AgentRegistry(() => {});
-	const runtime = new AgentRuntime({ sessionId: "seat", role: "main", emit: () => {}, deliver: (n) => delivered.push(n), now: () => clock }, registry);
+	const runtime = await runtimeOver({ sessionId: "seat", deliver: (n) => delivered.push(n), now: () => clock });
+	const registry = runtime.registry;
 	const record = (name, over = {}) => ({ name, taskId: `t-${name}`, ownerSessionId: "seat", type: "explore", description: `${name} job`, status: "completed", depth: 1, sessionFile: undefined, sessionId: `s-${name}`, cwd: "/", branch: undefined, model: "m", result: `${name} found it.`, error: undefined, readBy: undefined, readAt: undefined, toolUses: 0, costUsd: 0, totalTokens: 0, outputTokens: 0, startedAt: 1, completedAt: clock, toolCallId: undefined, workflowChild: false, ...over });
 	registry.put(record("ccwf2"));
 	runtime.publishSettled(registry.byName("ccwf2"));
@@ -1640,6 +1748,282 @@ async function until(condition, ms = 5000) {
 	check("and the refusal names both", said.includes("luna-a/gpt-6-luna") && said.includes("luna-b/gpt-6-luna"), said);
 	check("no agent was started", recordOf(two, "eclipse") === undefined);
 	two.session.dispose();
+}
+
+// ---------------------------------------------------------------------------
+// A retire, an attach or a spawn can overlap a settle or a start still in
+// flight; each must leave the record the owning session reads, and no child
+// may run on with nobody to own it.
+// ---------------------------------------------------------------------------
+{
+	console.log("\nretire and attach against work in flight");
+	const { AgentRuntime } = await jiti.import(`${ROOT}/lib/agent-runtime.ts`);
+	const { AgentWaitBoard } = await jiti.import(`${ROOT}/lib/agent-wait.ts`);
+	const { processExec } = await jiti.import(`${ROOT}/lib/agent-worktree.ts`);
+	const scripted = modelRuntime.getModel("scripted", "scripted-1");
+	const repo = fs.mkdtempSync(path.join(os.tmpdir(), "agent-inflight-repo-"));
+	execSync("git init -q -b main && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init", { cwd: repo, stdio: "pipe" });
+	/** Named holds on the git removal and the child loader, each opened by the test. */
+	const gates = new Map();
+	const gate = (name) => {
+		let open;
+		const promise = new Promise((resolve) => (open = resolve));
+		const held = { promise, reached: false, open: () => { gates.delete(name); open(); } };
+		gates.set(name, held);
+		return held;
+	};
+	const pass = async (name) => {
+		const held = gates.get(name);
+		if (held === undefined) return;
+		held.reached = true;
+		await held.promise;
+	};
+	const exec = async (command, args, options) => {
+		if (args[0] === "worktree" && args[1] === "remove") await pass("remove");
+		if (args[0] === "status") await pass("status");
+		return processExec(command, args, options);
+	};
+	const childLoader = async ({ cwd }) => {
+		await pass("loader");
+		const loader = new DefaultResourceLoader({ cwd, agentDir: getAgentDir(), noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
+		await loader.reload();
+		return loader;
+	};
+	const deps = () => ({ cwd: repo, agentDir: AGENT_DIR, exec, childLoader, waitBoard: new AgentWaitBoard() });
+	const port = (sessionId, persisted, over = {}) => ({ sessionId, sessionFile: undefined, sessionDir: path.join(AGENT_DIR, "sessions"), depth: 0, role: "main", types: [], model: () => scripted, resolveModel: () => scripted, modelRuntime, persist: (record) => persisted.push(record), emit: () => {}, deliver: () => false, log: () => {}, hasPendingInput: () => false, ...over });
+	const lastOf = (persisted, name) => persisted.filter((record) => record.name === name).at(-1);
+	const prompted = (prompt) => requests.some((r) => lastUserText({ messages: r.messages }).includes(prompt));
+
+	{
+		const persisted = [];
+		const runtime = new AgentRuntime(deps(), port("slow-remove-seat", persisted), []);
+		scriptFor("Slow remove works.", [{ delay: 30000, content: [text("never")] }]);
+		const removing = gate("remove");
+		await runtime.spawn({ description: "a worktree child", prompt: "Slow remove works.", name: "slow-remove", isolation: "worktree" });
+		await until(() => prompted("Slow remove works."), 5000);
+		const started = Date.now();
+		await runtime.retire("shutdown");
+		const took = Date.now() - started;
+		const record = lastOf(persisted, "slow-remove");
+		check("a settle still removing its worktree at the bound is cut off there", removing.reached && took >= 1500 && took < 4000, `removal reached ${removing.reached}, retire took ${took}ms`);
+		check("and stopped is written for it, never left running", record?.status === "stopped" && record.stoppedBy === "shutdown", `${record?.status} by ${record?.stoppedBy}`);
+		const writes = persisted.length;
+		removing.open();
+		await sleep(500);
+		check("its own settle, once the removal ends, writes nothing", persisted.length === writes, `${persisted.length - writes} late writes`);
+	}
+
+	{
+		const before = [];
+		const after = [];
+		const runtime = new AgentRuntime(deps(), port("owner-old-seat", before), []);
+		scriptFor("Owner child works.", [[text("owner child done")]]);
+		const removing = gate("remove");
+		await runtime.spawn({ description: "settles across an attach", prompt: "Owner child works.", name: "owner-child", isolation: "worktree" });
+		await until(() => removing.reached, 5000);
+		// What the continuation's file folds to: the running copy the handoff carried, read as lost.
+		const carried = { ...lastOf(before, "owner-child"), ownerSessionId: "owner-new-seat", status: "lost" };
+		runtime.detach();
+		runtime.attach(port("owner-new-seat", after), [carried]);
+		removing.open();
+		await until(() => after.some((record) => record.name === "owner-child" && record.status === "completed"), 5000);
+		const settled = lastOf(after, "owner-child");
+		check("a settle that spans an attach is written under the session that owns it now", settled?.status === "completed" && settled.ownerSessionId === "owner-new-seat", `${settled?.status} owned by ${settled?.ownerSessionId}`);
+	}
+
+	for (const [label, releaseAfterMs] of [["within the bound", 100], ["past the bound", 2500]]) {
+		const persisted = [];
+		const name = `late-spawn-${releaseAfterMs}`;
+		const prompt = `Late spawn ${releaseAfterMs} works.`;
+		const runtime = new AgentRuntime(deps(), port(`${name}-seat`, persisted), []);
+		scriptFor(prompt, [[text("late spawn done")]]);
+		const loading = gate("loader");
+		const spawning = runtime.spawn({ description: "spawned as the seat quits", prompt, name, isolation: "worktree" }).catch((error) => error);
+		await until(() => loading.reached, 5000);
+		const worktree = lastOf(persisted, name)?.cwd;
+		const retiring = runtime.retire("shutdown");
+		await sleep(releaseAfterMs);
+		loading.open();
+		await retiring;
+		await spawning;
+		await sleep(500);
+		check(`a child whose spawn was in flight at retire (${label}) never prompts`, !prompted(prompt));
+		check(`and its worktree is settled (${label})`, worktree !== undefined && worktree !== repo && !fs.existsSync(worktree), `${worktree} exists ${worktree !== undefined && fs.existsSync(worktree)}`);
+		if (releaseAfterMs < 2000) {
+			const record = lastOf(persisted, name);
+			check("within the bound, the retire waits for it and writes it stopped", record?.status === "stopped" && record.stoppedBy === "shutdown" && /had no changes and was removed/.test(record.result ?? ""), `${record?.status} by ${record?.stoppedBy}: ${record?.result}`);
+		}
+	}
+
+	{
+		const persisted = [];
+		const probeLoader = async ({ cwd }) => {
+			const loader = new DefaultResourceLoader({ cwd, agentDir: getAgentDir(), noExtensions: true, additionalExtensionPaths: [SCOPE_PROBE], noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
+			await loader.reload();
+			return loader;
+		};
+		const runtime = new AgentRuntime({ ...deps(), childLoader: probeLoader }, port("uncarried-old-seat", persisted), []);
+		scriptFor("Uncarried child works.", [{ delay: 30000, content: [text("never")] }]);
+		await runtime.spawn({ description: "a run the continuation did not carry", prompt: "Uncarried child works.", name: "uncarried" });
+		await until(() => prompted("Uncarried child works."), 5000);
+		const childId = lastOf(persisted, "uncarried")?.sessionId;
+		// The new registry holds no record for it, so the attach aborts it and its settle finds none.
+		runtime.detach();
+		runtime.attach(port("uncarried-new-seat", []), []);
+		const lives = globalThis.__childScopes;
+		const closed = await until(() => lives?.closed.has(childId) === true, 5000);
+		check("a run whose settle finds no record still releases its child's session", childId !== undefined && closed, JSON.stringify({ childId, opened: [...(lives?.opened ?? [])].includes(childId), closed: [...(lives?.closed ?? [])].includes(childId) }));
+	}
+
+	{
+		const reviewer = { name: "reviewer", description: "reviews", model: undefined, thinking: undefined, prompt: "You review.", source: "reviewer.md" };
+		const runtime = new AgentRuntime(deps(), port("types-old-seat", []), []);
+		runtime.detach();
+		runtime.attach(port("types-new-seat", [], { types: [reviewer], model: () => undefined, resolveModel: () => undefined }), []);
+		let refused;
+		try {
+			await runtime.spawn({ description: "a new type", prompt: "Review.", subagentType: "reviewer" });
+		} catch (error) {
+			refused = error;
+		}
+		check("a type file the continuation read is a type after the handoff", refused?.reason === "no-model", `${refused?.reason}: ${refused?.message}`);
+	}
+
+	{
+		const persisted = [];
+		const runtime = new AgentRuntime(deps(), port("settling-seat", persisted), []);
+		// It leaves a change, so its worktree is kept and a resume has somewhere to run.
+		scriptFor("Settling child works.", [[call("write", { path: "change.txt", content: "changed" })], [text("first answer")]]);
+		scriptFor("One more thing.", [[text("second answer")]]);
+		const checking = gate("status");
+		await runtime.spawn({ description: "a child mid-settle", prompt: "Settling child works.", name: "settling", isolation: "worktree" });
+		await until(() => checking.reached, 5000);
+		const toolCall = new AbortController();
+		const sending = runtime.send("settling", "One more thing.", false, undefined, toolCall.signal);
+		await sleep(100);
+		const promptedEarly = prompted("One more thing.");
+		checking.open();
+		const sent = await sending.catch((error) => ({ kind: `refused: ${error.message}` }));
+		check("a message sent while its agent settles is not prompted into the ending run", !promptedEarly && sent.kind === "resumed", `${sent.kind}, prompted early ${promptedEarly}`);
+		const { getEventListeners } = await import("node:events");
+		check("and its wait leaves no listener on the tool call's signal", getEventListeners(toolCall.signal, "abort").length === 0, `${getEventListeners(toolCall.signal, "abort").length} left`);
+		await until(() => lastOf(persisted, "settling")?.result?.includes("second answer"), 5000);
+		check("it resumes the agent once the settle has written, so the message is answered", lastOf(persisted, "settling")?.result?.includes("second answer") === true, lastOf(persisted, "settling")?.result);
+		fs.rmSync(lastOf(persisted, "settling").cwd, { recursive: true, force: true });
+	}
+
+	{
+		const persisted = [];
+		const runtime = new AgentRuntime(deps(), port("stop-settling-seat", persisted), []);
+		scriptFor("Finishing child works.", [[text("finished")]]);
+		const removing = gate("remove");
+		await runtime.spawn({ description: "stopped as it settles", prompt: "Finishing child works.", name: "finishing", isolation: "worktree" });
+		await until(() => removing.reached, 5000);
+		const stopping = runtime.stop("finishing", "TaskStop").catch((error) => error);
+		const stopped = await Promise.race([stopping, sleep(1000).then(() => ({ message: "still waiting" }))]);
+		check("a stop that lands while its agent settles is refused at once as not running, with the status it reached", stopped?.reason === "not-running" && stopped.status === "completed", `${stopped?.reason} ${stopped?.status}: ${stopped?.message}`);
+		removing.open();
+		await until(() => lastOf(persisted, "finishing")?.status === "completed", 5000);
+		const record = lastOf(persisted, "finishing");
+		check("and the completed record never carries stoppedBy", record?.status === "completed" && !persisted.some((r) => r.name === "finishing" && r.stoppedBy !== undefined), `${record?.status}, stoppedBy written: ${persisted.filter((r) => r.name === "finishing").map((r) => r.stoppedBy).join()}`);
+	}
+
+	{
+		// The extension runs git through the process, so the removal is held by a git on PATH that waits for a file.
+		const realGit = execSync("command -v git", { shell: "/bin/sh" }).toString().trim();
+		const shim = fs.mkdtempSync(path.join(os.tmpdir(), "git-hold-"));
+		fs.writeFileSync(path.join(shim, "git"), `#!/bin/sh\nif [ "$1" = worktree ] && [ "$2" = remove ]; then touch '${shim}/reached'; i=0; while [ ! -f '${shim}/open' ] && [ $i -lt 300 ]; do sleep 0.05; i=$((i + 1)); done; fi\nexec '${realGit}' "$@"\n`, { mode: 0o755 });
+		const pathBefore = process.env.PATH;
+		process.env.PATH = `${shim}:${pathBefore}`;
+		let seat;
+		try {
+			seat = await mainSeat({ cwd: repo });
+			scriptFor("spawn one to stop as it settles", [[call("Agent", { description: "stopped by the tool as it settles", prompt: "Tool-stopped child works.", name: "tool-stopped", isolation: "worktree" })], [text("ok")]]);
+			scriptFor("Tool-stopped child works.", [[text("tool-stopped done")]]);
+			await seat.session.prompt("spawn one to stop as it settles");
+			await seat.session.waitForIdle();
+			const held = await until(() => fs.existsSync(path.join(shim, "reached")), 5000);
+			check("the tool-level stop test holds the worktree removal, so the child is settling when TaskStop lands", held);
+			const said = await Promise.race([
+				seat.tool("TaskStop").execute("stop-1", { name: "tool-stopped" }).then((result) => result.content[0].text, (error) => error.message),
+				sleep(1000).then(() => "still waiting"),
+			]);
+			check("TaskStop on an agent that is settling says it already ended, with its status, not that it stopped it", said.startsWith('Agent "tool-stopped" already ended (completed);'), said);
+			fs.writeFileSync(path.join(shim, "open"), "");
+			await until(() => seat.events.some((e) => e.channel === "subagents:completed" && e.name === "tool-stopped"), 5000);
+		} finally {
+			process.env.PATH = pathBefore;
+			seat?.session.dispose();
+			fs.rmSync(shim, { recursive: true, force: true });
+		}
+	}
+
+	{
+		const persisted = [];
+		const runtime = new AgentRuntime(deps(), port("finished-at-bound-seat", persisted), []);
+		scriptFor("Finished child works.", [[text("finished before quit")]]);
+		const removing = gate("remove");
+		await runtime.spawn({ description: "finished, removing at quit", prompt: "Finished child works.", name: "finished-at-bound", isolation: "worktree" });
+		await until(() => removing.reached, 5000);
+		await runtime.retire("shutdown");
+		const record = lastOf(persisted, "finished-at-bound");
+		check("a run that finished and is still removing its worktree at the bound is written with the status it reached, not stopped", record?.status === "completed" && record.stoppedBy === undefined && record.result?.includes("finished before quit") === true, `${record?.status} by ${record?.stoppedBy}: ${record?.result}`);
+		const writes = persisted.length;
+		removing.open();
+		await sleep(300);
+		check("and its late settle, once the removal ends, leaves that record alone", persisted.length === writes && lastOf(persisted, "finished-at-bound") === record, `${persisted.length - writes} late writes`);
+	}
+
+	{
+		const persisted = [];
+		const runtime = new AgentRuntime(deps(), port("cancel-settling-seat", persisted), []);
+		scriptFor("Cancelled child works.", [[text("cancelled child done")]]);
+		const removing = gate("remove");
+		await runtime.spawn({ description: "a send cancelled mid-settle", prompt: "Cancelled child works.", name: "cancelled-send", isolation: "worktree" });
+		await until(() => removing.reached, 5000);
+		const controller = new AbortController();
+		const sending = runtime.send("cancelled-send", "Never mind.", false, undefined, controller.signal).then(() => undefined, (error) => error);
+		await sleep(50);
+		controller.abort();
+		const refused = await Promise.race([sending, sleep(1000).then(() => ({ message: "still waiting" }))]);
+		check("a send waiting on a settle ends when its tool call is aborted, so the worktree removal cannot hold a quit", refused?.reason === "cancelled", `${refused?.reason}: ${refused?.message}`);
+		removing.open();
+		await until(() => lastOf(persisted, "cancelled-send")?.status === "completed", 5000);
+	}
+
+	{
+		const persisted = [];
+		const runtime = new AgentRuntime(deps(), port("detach-settling-seat", persisted), []);
+		scriptFor("Detaching child works.", [[call("write", { path: "change.txt", content: "changed" })], [text("detaching answer")]]);
+		const checking = gate("status");
+		await runtime.spawn({ description: "a send across a detach", prompt: "Detaching child works.", name: "detaching", isolation: "worktree" });
+		await until(() => checking.reached, 5000);
+		const sending = runtime.send("detaching", "Still there?", false).then(() => undefined, (error) => error);
+		await sleep(50);
+		runtime.detach();
+		checking.open();
+		const refused = await sending;
+		check("a send that waited on a settle while the seat detached is refused, saying why", refused?._tag === "AgentSendRefused" && refused.reason === "detached", `${refused?._tag} ${refused?.reason}: ${refused?.message}`);
+		await runtime.retire("shutdown");
+		fs.rmSync(lastOf(persisted, "detaching").cwd, { recursive: true, force: true });
+	}
+
+	{
+		const earlier = { name: "earlier", taskId: "t-earlier", ownerSessionId: "closing-seat", type: "worker", description: "d", status: "completed", depth: 1, sessionFile: path.join(AGENT_DIR, "no-such-transcript.jsonl"), sessionId: "s-earlier", cwd: repo, branch: undefined, model: "m", result: "r", error: undefined, readBy: "tool", readAt: 1, toolUses: 0, costUsd: 0, totalTokens: 0, outputTokens: 0, startedAt: 1, completedAt: 2, toolCallId: undefined, workflowChild: false };
+		const persisted = [];
+		const runtime = new AgentRuntime(deps(), port("closing-seat", persisted), [earlier]);
+		const retiring = runtime.retire("shutdown");
+		const spawned = await runtime.spawn({ description: "too late", prompt: "Too late works.", name: "too-late", isolation: "worktree" }).then(() => undefined, (error) => error);
+		const resumed = await runtime.send("earlier", "Too late.", false).then(() => undefined, (error) => error);
+		await retiring;
+		await sleep(300);
+		check("a spawn that begins once the seat is retiring is refused, saying why", spawned?.reason === "retiring" && !persisted.some((r) => r.name === "too-late"), `${spawned?.reason}: ${spawned?.message}`);
+		check("and so is a resume", resumed?.reason === "retiring", `${resumed?.reason}: ${resumed?.message}`);
+	}
+
+	const big = await processExec("node", ["-e", "process.stdout.write('x'.repeat(2 * 1024 * 1024))"]);
+	check("a command the process runs keeps its whole output, as pi.exec does", big.code === 0 && big.stdout.length === 2 * 1024 * 1024, `code ${big.code}, ${big.stdout.length} characters`);
+	fs.rmSync(repo, { recursive: true, force: true });
 }
 
 trailer();

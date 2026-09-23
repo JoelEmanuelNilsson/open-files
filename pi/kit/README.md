@@ -79,21 +79,89 @@ fixture at 59, 97, and 161 columns — a herdr split, the pane beside it, and th
 tab zoomed — and asserts the TUI's one hard contract, that no line is ever wider
 than the width it was handed, across three modes and every width from 4 to 200.
 
-## `btw` — side chat that sees the main context
+## `side-chat` — `/btw`, a side thread under the main chat
 
-`/btw <question>` asks in a popover backed by a throwaway in-memory session
-seeded with the current branch and system prompt, read-only tools. Nothing
-reaches the main context unless you close the popover and pick "inject summary".
-The thread persists as custom entries.
+Ask a side question while the main task keeps running. The side thread sees
+main's context; main never sees the side thread.
+
+- `/btw` (or `alt+s`) toggles side mode. `/btw <text>` enters it and asks.
+  `/btw clear` starts the side thread over.
+- Entering appends a green `<SIDE-CHAT-STARTED>` line under main's chat, then
+  the side turns, drawn like ordinary chat. Main keeps working; its new output
+  lands above the marker. The prompt box shows a bold green `[SIDE]` at the left
+  of its top edge, and in the folded row when the prompt is empty.
+- In side mode a plain submit goes to the side thread. While a side answer runs,
+  Enter steers it and the follow-up key queues after it, as on main. Slash
+  commands and `!bash` act on main as usual.
+- While main compacts (or summarizes a branch for `/tree`), Enter and the
+  follow-up key do not send a side submit anywhere: pi would queue it for main
+  without an `input` event. The text stays in the editor with a notice; send
+  it again when compaction is done. `/` commands and Enter on `!cmd` keep pi's
+  behaviour.
+- Esc stops a running side answer; otherwise it leaves side mode. It never
+  aborts main. Leaving (Esc or `/btw`) removes the marker and the side turns
+  from the screen and aborts a side answer still running.
+- The side thread lives in memory: it survives toggling, and is dropped on exit
+  and on `/new`, `/resume` and `/fork`. Nothing is written to the session file.
+- Each side question sees main's context as it is at submit, cut at the last
+  complete point (no tool call without its result, no half-written reply), then
+  the side turns so far, then the question. Same model as main, at main's current
+  thinking level.
+- Only `read` and `web_search` run, at most 8 tool rounds per side question —
+  each round re-reads main's whole prefix, so cost grows with rounds and 8 covers
+  a few reads and a search. Every other tool call is refused, and the side
+  question's wrapper says so.
+
+**How the cache stays cheap.** A side request is main's last request, copied:
+`wire` publishes main's exact last provider payload, and its side branch sends a
+clone of it with only `messages` replaced. `system`, `tools`, `thinking`, TTLs
+and headers (main's session id, billing header and identity included) are main's
+bytes, so the tools and system cache entries are main's. The side's messages
+start with main's transcript, byte-equal to main's up to main's message
+breakpoint. Four breakpoints: system and last tool (main's), an anchor on the
+block main had its message breakpoint on — a cache read of main's whole prefix —
+and one on the side's last block, which writes only the side turns. Each side
+user message is wrapped identically on every request (the wrapper is applied at
+request time, never stored), so a side follow-up reads the earlier side turns
+too. Tools always come from main's payload, since tools sit before messages in
+the prefix and any difference would invalidate everything after them; execution
+is restricted separately.
+
+The side thread runs in one long-lived child session holding only side turns,
+loaded with an explicit extension list (`wire`, `transcript`, `pi-web-search`
+and the side thread's own guard), so none of the kit's other extensions run in
+it. `lib/side-mode.ts` holds which main sessions have side mode on; `zen-chrome`
+draws `[SIDE]` from it, and `agent-engine` and `skill-mentions` ignore a submit
+it claims, because pi runs `input` handlers in unsorted load order and a side
+submit must not interrupt main's waits or load a skill into main.
+
+Declared limits:
+
+- The side request reads cold (no anchor) when main has sent no request in this
+  process, main is not an `anthropic-messages` model, the side model differs
+  from main's last request, or main's transcript no longer matches that request's
+  prefix (compaction, tree navigation). Wire says so once (`wire:side-prefix`).
+- On models without managed effort, the side request's `thinking` is main's as of
+  its last request, not the current level.
+- Side spend is not in `/stats`: `agent-dock` does not run in the side session.
+- Inline (non-fullscreen) TUI mode redraws the whole screen on toggle.
+- `alt+s` needs the terminal to send Option as Meta on macOS.
+- pi does not expose `isCompacting` to extensions, so the hold follows its
+  compaction and tree events. Two short gaps remain where a side submit still
+  queues for main: while pi resolves the summarization key, before
+  `session_before_compact`, and after `session_compact` until pi clears its
+  flag. With `shift+enter` bound to submit, pi's `\`+Enter submit is not held.
+- A tool the side session does not register gets pi's generic `not found`; the
+  wrapper tells the model why.
 
 ## `continue-session` — handoff v2, the model continues itself in a new session
 
-At 200k context tokens a plain-text nudge lands at the tail of the context,
+At 250k context tokens a plain-text nudge lands at the tail of the context,
 in Joel's words: *"Write a handoff now, or when it suits the ongoing work.
 Start winding down; write it when relevant without destroying the work in
-flight."* At 220k a second, imperative one: *"Do this now. As soon as
+flight."* At 270k a second, imperative one: *"Do this now. As soon as
 possible. Don't start new work."* Each is said exactly once, where the phase
-changes; nothing repeats, and neither starts a turn. At 250k the run is
+changes; nothing repeats, and neither starts a turn. At 300k the run is
 aborted — and because one step (a subagent's report, a large read) can cross
 the gate and the stop together, the harness first writes its own handoff from
 what it knows and persists it, so the session ends with a record rather than
@@ -333,7 +401,8 @@ number, how long until this prefix is cold — `❄12m`, a bare `❄` once it is
 While the prompt is empty the box folds to one row carrying the path, branch,
 model, turn timer, background tasks, cache and context, in that priority order.
 When one row cannot hold them all it wraps to two; past two rows the lowest
-priority readings drop first.
+priority readings drop first. In side mode (`/btw`) the top edge and the folded
+row both lead with a bold green `[SIDE]`, which is never dropped before the path.
 
 The bottom edge carries the git branch, any background agents still running, how
 long the current turn has been running, and the context gauge:
@@ -363,8 +432,8 @@ gauge outlives everything, since it is the only thing on screen that says
 compaction is coming.
 
 The clock behind it is `lib/turn-clock.ts`, and zen-chrome is its only writer,
-gated to the session wearing the frame so a subagent or a `/btw` side thread
-cannot overwrite the number in front of you. `notify` reads that same clock, so
+gated to the session wearing the frame so a subagent cannot overwrite the number
+in front of you. `notify` reads that same clock, so
 the duration in the desktop ping is the duration you watched. A turn is
 `before_agent_start` to `agent_settled`; `agent_start` fires once per *attempt*,
 which is why an auto-retry or an auto-compaction used to restart the wave
@@ -1433,7 +1502,7 @@ owner's choice — which is how `/context` used to un-hide `zen-chrome`'s
 `Working...` row permanently (issue 18). Correct save/restore is not merely
 unwritten there, it is unbuildable, so exactly one extension owns each setter.
 An extension that needs another's behaviour to change publishes the fact that
-should change it — the `globalThis` seam `lib/side-flag.ts` and
+should change it — the `globalThis` seam `lib/side-mode.ts` and
 `lib/cache-window.ts` use — and the owner decides.
 
 Same shape as `before_provider_request` above, where one request needs one

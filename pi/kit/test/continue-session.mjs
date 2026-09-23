@@ -44,7 +44,7 @@ process.env.PI_AGENT_CHILD_EXTENSIONS = `${ROOT}/extensions/agent-engine.ts:${RO
 // Thresholds any scripted turn clears: the ladder is exercised, the switch is not driven by it.
 delete process.env.PI_HANDOFF_THRESHOLDS;
 
-const { createAgentSession, createAgentSessionRuntime, createEventBus, DefaultResourceLoader, ModelRuntime, SessionManager, getAgentDir } = await import(`${PI}/dist/index.js`);
+const { createAgentSession, createAgentSessionRuntime, createEventBus, DefaultResourceLoader, ExtensionRunner, ModelRuntime, SessionManager, getAgentDir } = await import(`${PI}/dist/index.js`);
 const { createAssistantMessageEventStream, getCurrentSystemPrompt, getCurrentTools } = await import(`${PI}/node_modules/@earendil-works/pi-ai/dist/index.js`);
 
 let pass = 0;
@@ -68,12 +68,12 @@ const { AGENT_RECORD_ENTRY } = await jiti.import(`${ROOT}/lib/agent-registry.ts`
 console.log("the ladder");
 {
 	const { DEFAULT_THRESHOLDS, thresholdsFrom, fitThresholds, phaseFor, ladderStep, lastRequestTokens, contextTokens, nudgeText, stopText, NUDGE_WORDING, GATE_WORDING, HANDOFF_HEADING, HANDOFF_SECTIONS, k } = ladder;
-	check("defaults are 200k / 220k / 250k (Joel, 2026-09-05)", DEFAULT_THRESHOLDS.nudge === 200_000 && DEFAULT_THRESHOLDS.gate === 220_000 && DEFAULT_THRESHOLDS.stop === 250_000);
+	check("defaults are 250k / 270k / 300k (Joel)", DEFAULT_THRESHOLDS.nudge === 250_000 && DEFAULT_THRESHOLDS.gate === 270_000 && DEFAULT_THRESHOLDS.stop === 300_000);
 	check("an override of three ascending integers is taken", JSON.stringify(thresholdsFrom("100,200,300")) === JSON.stringify({ nudge: 100, gate: 200, stop: 300 }));
 	check("a malformed override is ignored", thresholdsFrom("300,200,100") === DEFAULT_THRESHOLDS && thresholdsFrom("a,b,c") === DEFAULT_THRESHOLDS && thresholdsFrom("1,2") === DEFAULT_THRESHOLDS);
 	const haiku = fitThresholds(DEFAULT_THRESHOLDS, 200_000);
-	check("a 200k window is fitted: stop at 85%, gaps in proportion (C18)", haiku.stop === 170_000 && haiku.nudge === 136_000 && haiku.gate === 149_600, JSON.stringify(haiku));
-	check("only a window of 294k or more sees the three numbers as written", fitThresholds(DEFAULT_THRESHOLDS, 294_118) === DEFAULT_THRESHOLDS && fitThresholds(DEFAULT_THRESHOLDS, 294_000).stop === 249_900);
+	check("a 200k window is fitted: stop at 85%, gaps in proportion (C18)", haiku.stop === 170_000 && haiku.nudge === 141_666 && haiku.gate === 153_000, JSON.stringify(haiku));
+	check("only a window of 353k or more sees the three numbers as written", fitThresholds(DEFAULT_THRESHOLDS, 352_942) === DEFAULT_THRESHOLDS && fitThresholds(DEFAULT_THRESHOLDS, 352_000).stop === 299_200);
 	check("a 1M window is left alone", fitThresholds(DEFAULT_THRESHOLDS, 1_000_000) === DEFAULT_THRESHOLDS);
 	check("an unknown window is left alone", fitThresholds(DEFAULT_THRESHOLDS, null) === DEFAULT_THRESHOLDS && fitThresholds(DEFAULT_THRESHOLDS, 0) === DEFAULT_THRESHOLDS);
 	const t = { nudge: 100, gate: 200, stop: 300 };
@@ -91,82 +91,152 @@ console.log("the ladder");
 	check("the last request counts an aborted turn's input side (totalTokens 0)", lastRequestTokens(entries) === 100_000);
 	check("past a compaction with no request since, the last request is unknown", lastRequestTokens([...entries, { type: "compaction", id: "d" }]) === null);
 	check("the larger of pi's figure and the last request wins", contextTokens(61_000, 100_000) === 100_000 && contextTokens(120_000, 100_000) === 120_000 && contextTokens(undefined, 100_000) === 100_000 && contextTokens(5, null) === 5 && contextTokens(null, null) === null);
-	const nudge = nudgeText("nudged", 203_000, DEFAULT_THRESHOLDS);
-	const gate = nudgeText("gated", 221_000, DEFAULT_THRESHOLDS);
+	const nudge = nudgeText("nudged", 253_000, DEFAULT_THRESHOLDS);
+	const gate = nudgeText("gated", 271_000, DEFAULT_THRESHOLDS);
 	check("the nudge carries Joel's wording verbatim", nudge.includes(NUDGE_WORDING) && NUDGE_WORDING === "Write a handoff now, or when it suits the ongoing work. Start winding down; write it when relevant without destroying the work in flight.");
 	check("the gate is Joel's three beats and nothing else", gate.includes(GATE_WORDING) && GATE_WORDING === "Do this now. As soon as possible. Don't start new work." && !gate.includes(NUDGE_WORDING));
-	check("both name the size and the limit", nudge.startsWith("[handoff] Context is at 203k tokens; the soft limit is 200k.") && gate.startsWith("[handoff] Context is at 221k tokens; the hard limit is 220k."));
+	check("both name the size and the limit", nudge.startsWith("[handoff] Context is at 253k tokens; the soft limit is 250k.") && gate.startsWith("[handoff] Context is at 271k tokens; the hard limit is 270k."));
 	check("both carry the detector line and every section heading", [nudge, gate].every((text) => text.includes(`\`${HANDOFF_HEADING}\``) && HANDOFF_SECTIONS.every((h) => text.includes(h))));
 	check("the nudge asks for a plain message, not a tool", nudge.includes("no tool") && !/call the `handoff` tool/.test(nudge));
-	const stopped = stopText({ tokens: 251_000, thresholds: DEFAULT_THRESHOLDS, previous: "gated", recorded: true });
-	check("the stop names the size, the limit and the two ways forward", stopped.includes("251k") && stopped.includes("stop at 250k") && stopped.includes("/handoff-continue") && stopped.includes("/handoff asks") && k(1_499) === "1k");
-	check("the stop says whether the model was ever asked", stopText({ tokens: 251_000, thresholds: DEFAULT_THRESHOLDS, previous: "idle", recorded: true }).includes("never asked") && stopped.includes("asked at 200k and again at 220k"));
-	check("the stop says what was recorded and what is lost", stopped.includes("recorded what it knows") && stopped.includes("is lost") && stopText({ tokens: 251_000, thresholds: DEFAULT_THRESHOLDS, previous: "gated", recorded: false }).includes("could not record"));
-	const granted = ladder.lastTurnText(249_000, DEFAULT_THRESHOLDS);
-	check("the last turn names the size, the stop, and that the run ends whatever the turn contains", granted.startsWith("[handoff] Context is at 249k tokens; the stop is 250k.") && granted.includes(ladder.LAST_TURN_WORDING) && granted.includes(`\`${HANDOFF_HEADING}\``));
+	const stopped = stopText({ tokens: 301_000, thresholds: DEFAULT_THRESHOLDS, previous: "gated", recorded: true });
+	check("the stop names the size, the limit and the two ways forward", stopped.includes("301k") && stopped.includes("stop at 300k") && stopped.includes("/handoff-continue") && stopped.includes("/handoff asks") && k(1_499) === "1k");
+	check("the stop says whether the model was ever asked", stopText({ tokens: 301_000, thresholds: DEFAULT_THRESHOLDS, previous: "idle", recorded: true }).includes("never asked") && stopped.includes("asked at 250k and again at 270k"));
+	check("the stop says what was recorded and what is lost", stopped.includes("recorded what it knows") && stopped.includes("is lost") && stopText({ tokens: 301_000, thresholds: DEFAULT_THRESHOLDS, previous: "gated", recorded: false }).includes("could not record"));
+	const granted = ladder.lastTurnText(299_000, DEFAULT_THRESHOLDS);
+	check("the last turn names the size, the stop, and that the run ends whatever the turn contains", granted.startsWith("[handoff] Context is at 299k tokens; the stop is 300k.") && granted.includes(ladder.LAST_TURN_WORDING) && granted.includes(`\`${HANDOFF_HEADING}\``));
 	check("it forbids tools, because no turn follows in which a result could be used", ladder.LAST_TURN_WORDING.includes("no turn after this one") && ladder.LAST_TURN_WORDING.includes("Do not read, search, spawn or call any tool"));
-	const spent = (lastTurn) => stopText({ tokens: 251_000, thresholds: DEFAULT_THRESHOLDS, previous: "idle", recorded: true, lastTurn });
+	const spent = (lastTurn) => stopText({ tokens: 301_000, thresholds: DEFAULT_THRESHOLDS, previous: "idle", recorded: true, lastTurn });
 	check("after a granted turn the stop says the model was asked once, and what came of it", spent("wrote").includes("given one turn to write its handoff and wrote one") && spent("silent").includes("and did not") && !spent("wrote").includes("never asked"));
 	check("a written handoff is not called lost, and the stop does not say none was written", spent("wrote").includes("The model's own handoff is recorded in this session.") && !spent("wrote").includes("is lost") && !spent("wrote").includes("no handoff written") && spent("silent").includes("with no handoff written"));
-	const child = stopText({ tokens: 251_000, thresholds: DEFAULT_THRESHOLDS, previous: "gated", recorded: true, seat: "child" });
+	const child = stopText({ tokens: 301_000, thresholds: DEFAULT_THRESHOLDS, previous: "gated", recorded: true, seat: "child" });
 	check("a child seat is not offered the commands only a human types", !child.includes("/handoff-continue") && !child.includes("/handoff asks") && child.includes("Its parent is told") && stopped.includes("/handoff-continue"));
 	const { nudgeDelivery } = ladder;
 	check("a run that continues is steered, a run that is ending is appended", nudgeDelivery(true) === "steer" && nudgeDelivery(false) === "append");
 }
 
 // ---------------------------------------------------------------------------
-// /handoff starts a turn with a custom message, and pi hands out prompt options
-// only on the user path. On the first turn of a process — a resume, or /handoff
-// typed at launch — nothing had captured them, `wire` fell back to pi's own
-// prompt behind the Claude Code identity block, and Anthropic refused the
-// request as a third-party app (req_011CenGzjBfwouGRX52Q5PE3, 2026-09-06).
-console.log("\n/handoff primes the prompt the turn it starts will be built with");
+// /handoff used to start its turn with a custom message, which skips pi's
+// `before_agent_start`: on the first turn of a process nothing had captured the
+// prompt options, and Anthropic refused pi's own prompt behind the Claude Code
+// identity block (req_011CenGzjBfwouGRX52Q5PE3, 2026-09-06). It asks as the
+// user now, so the turn is an ordinary one and nothing has to be primed by hand.
+console.log("\n/handoff asks as the user");
 {
-	const { capturedPromptOptions } = await jiti.import(`${ROOT}/lib/prompt-capture.ts`);
-	const { PROMPT_UNAVAILABLE } = await jiti.import(`${ROOT}/lib/owned-prompt.ts`);
 	const sessionId = "7a1c9f60-0000-4000-8000-0000000aa001";
-	const options = { cwd: ROOT, selectedTools: ["read", "bash"], appendSystemPrompt: "<COMMUNICATION>\nsay less\n</COMMUNICATION>" };
 	let asked = 0;
 	const sent = [];
+	const said = [];
+	const toasts = [];
 	const ctx = {
 		hasUI: true,
 		cwd: ROOT,
+		isIdle: () => true,
 		getContextUsage: () => ({ tokens: 120_000, contextWindow: 1_000_000 }),
-		getSystemPromptOptions: () => { asked++; return options; },
+		getSystemPromptOptions: () => { asked++; return {}; },
 		sessionManager: { getSessionId: () => sessionId, getBranch: () => [], getHeader: () => ({}) },
-		ui: { notify: () => {}, setStatus: () => {}, theme: { fg: (_c, s) => s } },
-		model: { id: "claude-test", api: "anthropic-messages", baseUrl: "https://api.anthropic.com" },
-		modelRegistry: { isUsingOAuth: () => true, find: (provider, id) => ({ provider, id }) },
+		ui: { notify: (text) => toasts.push(text), setStatus: () => {}, theme: { fg: (_c, s) => s } },
 	};
 	const commands = new Map();
 	const handlers = new Map();
-	const mod = await jiti.import(`${ROOT}/extensions/continue-session.ts?handoff-primes`);
+	const mod = await jiti.import(`${ROOT}/extensions/continue-session.ts?handoff-asks`);
 	mod.default({
 		on: (e, h) => handlers.set(e, h),
+		events: { on: () => () => {}, emit: () => {} },
 		registerCommand: (n, o) => commands.set(n, o),
 		registerMessageRenderer: () => {},
-		sendMessage: (message, o) => sent.push({ message, o }),
+		sendMessage: (message, o) => said.push({ message, o }),
+		sendUserMessage: (content, o) => sent.push({ content, o }),
 		getThinkingLevel: () => "high",
 		appendEntry: () => {},
 	});
 	handlers.get("session_start")?.({ reason: "startup" }, ctx);
-	check("nothing is captured before the command runs", capturedPromptOptions(sessionId) === undefined);
 	await commands.get("handoff").handler("", ctx);
-	check("it asks pi for the options rather than reconstructing them", asked === 1);
-	check("and files them under this seat before the turn exists", capturedPromptOptions(sessionId) === options);
-	check("the nudge is still what starts the turn", sent.length === 1 && sent[0].o.triggerTurn === true);
+	check("/handoff sends the gate's words as a user message, steered when a run is in flight", sent.length === 1 && String(sent[0].content).startsWith("[handoff]") && sent[0].o?.deliverAs === "steer", JSON.stringify(sent.map((s) => s.o)));
+	check("and no custom message, so no turn skips before_agent_start", said.length === 0, JSON.stringify(said.map((s) => s.o)));
+	check("it no longer primes the prompt options by hand", asked === 0, String(asked));
+	const askedNotice = () => toasts.filter((text) => String(text).includes("asked for the document")).length;
+	check("it says nothing until pi accepts the message", askedNotice() === 0, JSON.stringify(toasts));
+	// What pi emits for a message it accepted: `input`, then, if it reaches the model, the message's `message_start`.
+	const accepted = (text, streamingBehavior) => handlers.get("input")?.({ type: "input", text, source: "extension", ...(streamingBehavior ? { streamingBehavior } : {}) }, ctx);
+	const reached = (role, text) => handlers.get("message_start")?.({ type: "message_start", message: { role, content: [{ type: "text", text }], timestamp: 0 } }, ctx);
+	accepted(String(sent[0]?.content));
+	check("idle, its input alone says nothing: pi checks the model and key after it", askedNotice() === 0, JSON.stringify(toasts));
+	reached("assistant", String(sent[0]?.content));
+	check("an assistant message with the same words is not the ask", askedNotice() === 0, JSON.stringify(toasts));
+	reached("user", String(sent[0]?.content));
+	check("idle, it says it asked once its message starts", askedNotice() === 1, JSON.stringify(toasts));
+	await commands.get("handoff").handler("", ctx);
+	const beforeSteer = askedNotice();
+	accepted(String(sent[1]?.content), "steer");
+	check("mid-run, a queued steer that Joel's abort drops says nothing", askedNotice() === beforeSteer, JSON.stringify(toasts));
+	reached("user", String(sent[1]?.content));
+	check("mid-run, it says it asked once pi injects the steer", askedNotice() === beforeSteer + 1, JSON.stringify(toasts));
+}
 
-	// The point of the priming, end to end: the request that turn produces carries
-	// the seat's own prompt, not a declared absence and never pi's prose.
-	const wireHandlers = new Map();
-	const wireMod = await jiti.import(`${ROOT}/extensions/wire.ts?handoff-primes`);
-	wireMod.default({ on: (e, h) => wireHandlers.set(e, h), registerCommand: () => {} });
-	const request = wireHandlers.get("before_provider_request")(
-		{ payload: { messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }], system: [{ type: "text", text: "vanilla pi prompt", cache_control: { type: "ephemeral" } }] } },
-		ctx,
-	);
-	check("the turn it triggers is built with a real system prompt", request.system.length === 4 && request.system[2].text !== PROMPT_UNAVAILABLE);
-	check("which is the owned one, carrying what pi's accessor gave", request.system[2].text.includes("say less") && !request.system[2].text.includes("vanilla pi prompt"));
+// ---------------------------------------------------------------------------
+console.log("\nthe session scope");
+{
+	let scopes;
+	try { scopes = await jiti.import(`${ROOT}/lib/session-scope.ts`); } catch (error) { check("lib/session-scope.ts loads", false, error.message.split("\n")[0]); }
+	if (scopes !== undefined) {
+		const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+		// One extension runtime: several factories on one event bus, as pi loads them.
+		const runtime = () => {
+			const listeners = new Map();
+			const bus = { on: (channel, handler) => { listeners.set(channel, [...(listeners.get(channel) ?? []), handler]); return () => {}; }, emit: (channel, data) => { for (const handler of listeners.get(channel) ?? []) handler(data); } };
+			const extension = () => {
+				const handlers = new Map();
+				const sent = [];
+				const pi = { on: (event, handler) => handlers.set(event, [...(handlers.get(event) ?? []), handler]), events: bus, sendMessage: (message, options) => sent.push({ message, options }) };
+				const fire = async (event) => { for (const handler of handlers.get(event) ?? []) await handler({ type: event }, {}); };
+				return { scope: scopes.createSessionScope(pi), sent, fire };
+			};
+			return { extension };
+		};
+		const message = { customType: "t", content: "x", display: true };
+		const first = runtime();
+		const engine = first.extension();
+		const bash = first.extension();
+		check("unprimed: startTurn returns false and sends nothing", engine.scope.startTurn(message, { deliverAs: "followUp" }) === false && engine.sent.length === 0);
+		await engine.fire("before_agent_start");
+		check("once before_agent_start has fired, startTurn sends with triggerTurn and returns true", engine.scope.startTurn(message, { deliverAs: "followUp" }) === true && engine.sent.length === 1 && engine.sent[0].options.triggerTurn === true && engine.sent[0].options.deliverAs === "followUp");
+		await bash.fire("before_agent_start");
+		// Every scope of the runtime refuses, whichever of them saw the switch begin.
+		const refusing = () => engine.scope.startTurn(message, { deliverAs: "followUp" }) === false && bash.scope.startTurn(message, { deliverAs: "followUp" }) === false && engine.sent.length === 1 && bash.sent.length === 0;
+		const runStarts = async () => { await engine.fire("agent_start"); await bash.fire("agent_start"); };
+		const open = () => {
+			const ok = engine.scope.startTurn(message, { deliverAs: "followUp" }) === true && bash.scope.startTurn(message, { deliverAs: "followUp" }) === true;
+			engine.sent.splice(1);
+			bash.sent.splice(0);
+			return ok;
+		};
+		for (const begins of ["session_before_switch", "session_before_fork"]) {
+			await engine.fire(begins);
+			const refused = refusing();
+			// A cancelled switch: the refusal ends when the next run starts.
+			await runStarts();
+			check(`${begins} in one scope: every scope refuses until the next agent_start`, refused && open());
+		}
+		bash.scope.holdTurnsForSwitch();
+		const held = refusing();
+		await runStarts();
+		check("holdTurnsForSwitch in one scope: every scope refuses until the next agent_start", held && open());
+		let fired = 0;
+		bash.scope.timeout(5, () => fired++);
+		bash.scope.interval(5, () => fired++);
+		await engine.fire("session_shutdown");
+		check("the first shutdown handler closes every scope of the runtime", engine.scope.signal.aborted && bash.scope.signal.aborted);
+		check("closed: startTurn returns false and sends nothing", bash.scope.startTurn(message, { deliverAs: "steer" }) === false && bash.sent.length === 0 && engine.scope.startTurn(message, { deliverAs: "steer" }) === false && engine.sent.length === 1);
+		await pause(30);
+		check("closed: its timers are cleared, and a new one never starts", fired === 0 && (bash.scope.timeout(1, () => fired++), await pause(10), fired === 0));
+		// A reload reuses the loader's bus: the new runtime's scopes share it with the closed ones.
+		const reloaded = first.extension();
+		check("a reload is a new runtime on the same bus, and it starts unprimed and open", reloaded.scope.startTurn(message, { deliverAs: "followUp" }) === false && reloaded.sent.length === 0 && !reloaded.scope.signal.aborted);
+		await engine.fire("session_shutdown");
+		await bash.fire("session_shutdown");
+		await reloaded.fire("before_agent_start");
+		check("the old runtime's shutdown does not close the new runtime's scopes", !reloaded.scope.signal.aborted && reloaded.scope.startTurn(message, { deliverAs: "followUp" }) === true && reloaded.sent.length === 1);
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -227,9 +297,9 @@ console.log("\nthe generated block");
 	const failed = seatCarryWarning({ wanted: { model: "anthropic/claude-opus-5", thinking: "high" }, got: { model: "anthropic/claude-fable-5-1", thinking: "medium" }, reason: "there is no API key for that model" });
 	check("a carry that could not happen names the seat it wanted, the one it got, and why", failed.includes("wanted anthropic/claude-opus-5 at high") && failed.includes("runs on anthropic/claude-fable-5-1 at medium") && failed.includes("no API key"), failed);
 	const { generatedHandoff, GENERATED_HANDOFF_ENTRY, isHandoffDocumentText } = rules;
-	const harnessDoc = generatedHandoff({ tokens: 251_000, thresholds: ladder.DEFAULT_THRESHOLDS });
+	const harnessDoc = generatedHandoff({ tokens: 301_000, thresholds: ladder.DEFAULT_THRESHOLDS });
 	check("the harness's own handoff is a document by the detector's rule", isHandoffDocumentText(harnessDoc) && GENERATED_HANDOFF_ENTRY === "handoff-generated");
-	check("it names the size and the stop, and claims nothing it cannot know", harnessDoc.includes("251k") && harnessDoc.includes("stop at 250k") && harnessDoc.includes("Not recorded") && harnessDoc.includes("Read the old session"));
+	check("it names the size and the stop, and claims nothing it cannot know", harnessDoc.includes("301k") && harnessDoc.includes("stop at 300k") && harnessDoc.includes("Not recorded") && harnessDoc.includes("Read the old session"));
 	check("and it carries no history of its own: the block that follows is all the harness has", harnessDoc.split("\n").length <= 10);
 }
 
@@ -246,10 +316,13 @@ console.log("\nwhat the new session carries");
 		{ type: "custom", customType: AGENT_RECORD_ENTRY, data: { name: "w", taskId: "t1", ownerSessionId: "old", sessionId: "s", status: "completed", result: "ok" } },
 		{ type: "custom", customType: AGENT_RECORD_ENTRY, data: { broken: true } },
 	];
-	const carried = carriedEntries(entries, "old", "new");
+	const carried = carriedEntries(entries, "old", "new", new Set());
 	check("agent records of this owner are carried in order with the new owner (ticket 19 q6)", carried.length === 3 && carried[0].data.name === "w" && carried[0].data.ownerSessionId === "new" && carried[0].data.status === "running" && carried[1].data.status === "completed" && carried[1].data.ownerSessionId === "new", JSON.stringify(carried));
 	check("another session's records and malformed ones are not", !carried.some((e) => e.data?.name === "x" || e.data?.broken));
 	check("the latest cache-mode choice rides along last, so the launch question is not asked again", carried[2].customType === CACHE_MODE_ENTRY && carried[2].data.mode === "keepalive");
+	const handed = (taskId) => ({ type: "custom", customType: AGENT_RECORD_ENTRY, data: { name: `h-${taskId}`, taskId, ownerSessionId: "old", sessionId: `s-${taskId}`, status: "completed", result: "ok", readBy: "handed", readAt: 1 } });
+	const marks = carriedEntries([handed("seen"), handed("lost")], "old", "new", new Set(["seen"])).map((e) => `${e.data.taskId}:${e.data.readBy}`).join(",");
+	check("a handed result the old file answered is carried read by the conversation; one it never answered stays handed", marks === "seen:conversation,lost:handed", marks);
 	check("session-mode really persists under that type", fs.readFileSync(`${ROOT}/extensions/session-mode.ts`, "utf8").includes(`const ENTRY_TYPE = "${CACHE_MODE_ENTRY}"`));
 }
 
@@ -329,6 +402,13 @@ const call = (name, args, id = `call_${Math.random().toString(16).slice(2, 8)}`)
 function streamSimple(model, context, options) {
 	const stream = createAssistantMessageEventStream();
 	let aborted = false;
+	const request = { model: model.id, sessionId: options?.sessionId, reasoning: options?.reasoning, system: getCurrentSystemPrompt(context.messages), tools: getCurrentTools(context.messages), messages: context.messages };
+	requests.push(request);
+	const key = [...script.keys()].filter((k) => lastUserText(context).includes(k)).sort((a, b) => b.length - a.length)[0];
+	const steps = key === undefined ? undefined : script.get(key);
+	const step = steps?.shift() ?? [text(`(no script for: ${lastUserText(context).slice(0, 60)})`)];
+	// A provider that never answers an abort: the run stays streaming until the script ends it.
+	if (!Array.isArray(step) && step.ignoreAbort === true) options = { ...options, signal: undefined };
 	options?.signal?.addEventListener("abort", () => {
 		if (aborted) return;
 		aborted = true;
@@ -336,11 +416,6 @@ function streamSimple(model, context, options) {
 		stream.push({ type: "error", reason: "aborted", error: { ...partial, errorMessage: "Request was aborted" } });
 		stream.end();
 	}, { once: true });
-	const request = { model: model.id, sessionId: options?.sessionId, reasoning: options?.reasoning, system: getCurrentSystemPrompt(context.messages), tools: getCurrentTools(context.messages), messages: context.messages };
-	requests.push(request);
-	const key = [...script.keys()].filter((k) => lastUserText(context).includes(k)).sort((a, b) => b.length - a.length)[0];
-	const steps = key === undefined ? undefined : script.get(key);
-	const step = steps?.shift() ?? [text(`(no script for: ${lastUserText(context).slice(0, 60)})`)];
 	const content = Array.isArray(step) ? step : step.content;
 	const delay = Array.isArray(step) ? 5 : (step.delay ?? 5);
 	const live = Array.isArray(step) ? undefined : step.live;
@@ -419,11 +494,15 @@ async function until(condition, ms = 5000) {
  * every session_start / session_shutdown with the file bytes at shutdown, so
  * the old file can be compared after the switch.
  */
-async function mainSeat({ extensions = [`${ROOT}/extensions/agent-engine.ts`, `${ROOT}/extensions/continue-session.ts`], cwd = ROOT, provider = scriptedProvider, model = ["scripted", "scripted-1"], gap, onShutdown } = {}) {
+async function mainSeat({ extensions = [`${ROOT}/extensions/agent-engine.ts`, `${ROOT}/extensions/continue-session.ts`], cwd = ROOT, provider = scriptedProvider, model = ["scripted", "scripted-1"], gap, onShutdown, onStart, sessionManager = SessionManager.create(cwd) } = {}) {
 	const log = [];
 	const events = [];
 	const observer = (pi) => {
-		pi.on("session_start", (event, ctx) => log.push({ type: "start", reason: event.reason, previous: event.previousSessionFile, file: ctx.sessionManager.getSessionFile(), id: ctx.sessionManager.getSessionId() }));
+		pi.on("session_start", async (event, ctx) => {
+			log.push({ type: "start", reason: event.reason, previous: event.previousSessionFile, file: ctx.sessionManager.getSessionFile(), id: ctx.sessionManager.getSessionId() });
+			// Inline factories load after the extension files, so the engine has re-hosted by now.
+			if (event.reason === "new") await onStart?.(ctx);
+		});
 		pi.on("session_shutdown", async (event, ctx) => {
 			const file = ctx.sessionManager.getSessionFile();
 			log.push({ type: "shutdown", reason: event.reason, target: event.targetSessionFile, file, bytes: file && fs.existsSync(file) ? fs.readFileSync(file) : undefined });
@@ -452,7 +531,7 @@ async function mainSeat({ extensions = [`${ROOT}/extensions/agent-engine.ts`, `$
 		const { session } = await createAgentSession({ cwd: runCwd, agentDir, thinkingLevel: "off", noTools: "builtin", resourceLoader: loader, sessionManager, modelRuntime, ...(seatModel ? { model: seatModel } : {}), ...(sessionStartEvent ? { sessionStartEvent } : {}) });
 		return { session, services: { cwd: runCwd, agentDir, modelRuntime, settingsManager: session.settingsManager, resourceLoader: loader, diagnostics: [] }, diagnostics: [] };
 	};
-	const runtime = await createAgentSessionRuntime(createRuntime, { cwd, agentDir: getAgentDir(), sessionManager: SessionManager.create(cwd) });
+	const runtime = await createAgentSessionRuntime(createRuntime, { cwd, agentDir: getAgentDir(), sessionManager });
 	const bind = async (session) => {
 		await session.bindExtensions({
 			mode: "print",
@@ -960,8 +1039,589 @@ console.log("\na handoff while a child streams (2026-09-23)");
 		check("(d) the old session's last request and every new-session request carry the same tools, after wire's cut and order", prefixed.length >= 2 && toolDrift.length === 0, `${prefixed.length} requests, tools ${prefixed[0]?.wireTools?.map((t) => t.name).join(",")}; differ: ${[...new Set(toolDrift)].join(" | ")}`);
 		const promptDrift = prefixed.filter((r) => promptOf(r) !== promptOf(prefixed[0])).length;
 		check("(d) and the same owned system prompt", prefixed.length >= 2 && promptDrift === 0, `${promptDrift} of ${prefixed.length} requests differ`);
+		// A refused offer used to append a mark and a restore, so the file said the result was unread twice.
+		const verdicts = entriesOf(fresh.sessionFile).filter((e) => e.customType === "agent-record" && e.data?.name === worker && e.data.status === "completed" && e.data.readBy === undefined).length;
+		const landed = conversationOf(freshRequests().at(-1) ?? { messages: [] }).filter((m) => JSON.stringify(m).includes(`child ${tag} done`)).length;
+		check("(e) its verdict is written once in the new file and lands once in the conversation", verdicts === 1 && landed === 1, `${verdicts} unread completed records, ${landed} messages carry it`);
 		fresh.dispose();
 	}
+}
+
+// ---------------------------------------------------------------------------
+// The turn seam: a custom message that starts a turn skips `before_agent_start`,
+// so every turn the harness starts on its own goes through the session scope,
+// which refuses until this runtime's first user turn and once shutdown begins.
+const wireExtensions = ["agent-engine", "continue-session", "wire"].map((name) => `${ROOT}/extensions/${name}.ts`);
+const wireSeatProvider = (pi) => pi.registerProvider("scripted-wire", { baseUrl: "http://scripted.invalid", apiKey: "scripted", api: "anthropic-messages", streamSimple, models: [{ ...SCRIPTED_MODEL, id: "scripted-wire-1" }] });
+const wireSeat = (options = {}) => mainSeat({ extensions: wireExtensions, provider: wireSeatProvider, model: ["scripted-wire", "scripted-wire-1"], ...options });
+const userTextsOf = (request) => conversationOf(request).filter((m) => m.role === "user").map((m) => (typeof m.content === "string" ? m.content : m.content.map((b) => b.text ?? "").join("")));
+
+console.log("\na result that settles before the continuation's message starts no turn and rides that message's turn");
+{
+	const { PROMPT_UNAVAILABLE } = await jiti.import(`${ROOT}/lib/owned-prompt.ts`);
+	let attach;
+	const attached = new Promise((resolve) => { attach = resolve; });
+	let freshId;
+	let settledBeforeContinuation = false;
+	const seat = await wireSeat({
+		// The new session has started and re-hosted the runtime; `withSession` has not sent the continuation yet.
+		onStart: async (ctx) => {
+			freshId = ctx.sessionManager.getSessionId();
+			(await attached).end();
+			settledBeforeContinuation = await until(() => seat.events.some((e) => e.channel === "subagents:completed" && e.name === "early-settler"), 5000);
+		},
+	});
+	const old = seat.session();
+	scriptFor("Spawn the early settler", [[call("Agent", { description: "settles early", prompt: "early settler works", name: "early-settler" })], [text(DOC)]]);
+	scriptFor("early settler works", [{ content: [text("early settler done")], live: { attach } }]);
+	scriptFor("Continue session", [[text("continued")], [text("continued again")]]);
+	await old.prompt("Spawn the early settler");
+	await until(() => seat.session() !== old, 8000);
+	const fresh = seat.session();
+	await until(() => requests.some((r) => r.sessionId === freshId), 5000);
+	await fresh.waitForIdle();
+	const freshRequests = requests.filter((r) => r.sessionId === freshId);
+	const first = freshRequests[0];
+	check("the child settled in the new session before its continuation was sent", settledBeforeContinuation);
+	check("no turn started for it: the new session's first request is the continuation's", first !== undefined && userTextsOf(first).some((t) => t.startsWith("Continue session `")), first === undefined ? "no request" : JSON.stringify(userTextsOf(first).map((t) => t.slice(0, 50))));
+	check("and that request carries the result", first !== undefined && JSON.stringify(first.messages).includes("early settler done"));
+	check("the new session made exactly the continuation's request", freshRequests.length === 1, `${freshRequests.length} requests`);
+	check("none of them went out PROMPT_UNAVAILABLE", freshRequests.every((r) => !r.wireSystem?.some((b) => b.text === PROMPT_UNAVAILABLE)));
+	fresh.dispose();
+}
+
+console.log("\n/handoff as the first turn after a resume");
+{
+	const { PROMPT_UNAVAILABLE } = await jiti.import(`${ROOT}/lib/owned-prompt.ts`);
+	const { declareSeatWorkflows } = await jiti.import(`${ROOT}/lib/seat.ts`);
+	const first = await wireSeat();
+	scriptFor("an earlier session", [[text("hello")], [text("not written yet")]]);
+	await first.session().prompt("an earlier session");
+	const file = first.session().sessionFile;
+	const id = first.session().sessionId;
+	// Quit: wire forgets the capture, as a fresh process has none.
+	await first.runtime.dispose();
+	declareSeatWorkflows(id, true);
+	const seat = await wireSeat({ sessionManager: SessionManager.open(file) });
+	const resumed = seat.session();
+	const before = requests.length;
+	await resumed.prompt("/handoff");
+	await until(() => requests.length > before, 5000);
+	await resumed.waitForIdle();
+	const request = requests.slice(before)[0];
+	const agentTool = request?.wireTools?.find((tool) => tool.name === "Agent");
+	check("the /handoff turn is a request of the resumed session", request?.sessionId === id);
+	check("it goes out with wire's owned prompt, not PROMPT_UNAVAILABLE", request !== undefined && request.wireSystem?.length > 0 && !request.wireSystem.some((b) => b.text === PROMPT_UNAVAILABLE), JSON.stringify(request?.wireSystem?.map((b) => b.text.slice(0, 40))));
+	check("and with the workflow seat's Agent description", agentTool?.description?.includes("a `Workflow`;") === true, agentTool?.description?.slice(0, 120));
+	check("the gate's words arrive as the user's message", request !== undefined && userTextsOf(request).some((t) => t.startsWith("[handoff]")));
+	declareSeatWorkflows(id, false);
+	await seat.runtime.dispose();
+}
+
+// Between accepting a user prompt and starting its run, pi reads as idle
+// (`isStreaming` is false through `_checkCompaction` and the
+// `before_agent_start` handlers). A result that started its own turn there took
+// the run, and the user's prompt threw "Agent is already processing a prompt".
+console.log("\na result that settles while a user prompt is starting");
+for (const moment of ["input", "before_agent_start"]) {
+	console.log(`  -- during ${moment}`);
+	const tag = `window-${moment}`;
+	let attach;
+	const attached = new Promise((resolve) => { attach = resolve; });
+	let armed = false;
+	let seat;
+	const settle = async () => {
+		if (!armed) return;
+		armed = false;
+		(await attached).end();
+		await until(() => seat.events.some((e) => e.channel === "subagents:completed" && e.name === tag), 5000);
+	};
+	// Loaded after the engine, so its hook runs after the engine's (and its scope's) handlers for the same event.
+	const provider = (pi) => {
+		scriptedProvider(pi);
+		pi.on(moment, async () => { await settle(); return undefined; });
+	};
+	seat = await mainSeat({ provider });
+	const main = seat.session();
+	scriptFor(`Spawn the ${tag} child`, [[call("Agent", { description: "settles in the window", prompt: `${tag} child works`, name: tag })], [text("spawned")]]);
+	scriptFor(`${tag} child works`, [{ content: [text(`${tag} child done`)], live: { attach } }]);
+	scriptFor(`the ${tag} turn`, [[text("answered")], [text("answered again")]]);
+	await main.prompt(`Spawn the ${tag} child`);
+	await main.waitForIdle();
+	let starts = 0;
+	main.subscribe((event) => { if (event.type === "agent_start") starts++; });
+	const before = requests.length;
+	armed = true;
+	let refused;
+	try { await main.prompt(`the ${tag} turn`); } catch (error) { refused = error; }
+	await main.waitForIdle();
+	const turn = requests.slice(before).filter((r) => r.sessionId === main.sessionId);
+	check(`${moment}: the user's prompt is not refused as already processing`, refused === undefined, refused?.message);
+	check(`${moment}: one run, the user's`, starts === 1 && turn.length > 0 && userTextsOf(turn[0]).some((t) => t === `the ${tag} turn`), `${starts} runs; first request users ${JSON.stringify(turn[0] && userTextsOf(turn[0]))}`);
+	check(`${moment}: the result arrives in that run`, turn.some((r) => JSON.stringify(r.messages).includes(`${tag} child done`)), `${turn.length} requests`);
+	main.dispose();
+}
+
+console.log("\nno turn starts during shutdown");
+{
+	process.env.PI_KIT_BACKGROUND_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "continue-session-background-"));
+	// Stands in for a shutdown handler that awaits (the engine's retire will), registered between two scoped extensions.
+	const slow = path.join(AGENT_DIR, "slow-shutdown.ts");
+	fs.writeFileSync(slow, "export default function (pi) { pi.on(\"session_shutdown\", async () => { await globalThis.__slowShutdown?.(); }); }\n");
+	const seat = await mainSeat({ extensions: [`${ROOT}/extensions/agent-engine.ts`, slow, `${ROOT}/extensions/bash.ts`] });
+	const main = seat.session();
+	scriptFor("Start a background sleep", [[call("bash", { command: "sleep 0.4; echo slept", run_in_background: true })], [text("started")], [text("a turn during shutdown")]]);
+	await main.prompt("Start a background sleep");
+	await main.waitForIdle();
+	const before = requests.length;
+	let turns = 0;
+	main.subscribe((event) => { if (event.type === "agent_start") turns++; });
+	globalThis.__slowShutdown = () => sleep(1200);
+	await seat.runtime.dispose();
+	delete globalThis.__slowShutdown;
+	check("a background command that ends while shutdown runs starts no turn", turns === 0 && requests.length === before, `${turns} turns, ${requests.length - before} requests`);
+	fs.rmSync(process.env.PI_KIT_BACKGROUND_DIR, { recursive: true, force: true });
+	delete process.env.PI_KIT_BACKGROUND_DIR;
+}
+
+// The outgoing session is idle at `session_before_switch`: a result that settled
+// there started a turn in the outgoing session, which pi's teardown then
+// aborted, and the successor never got it.
+console.log("\na result that settles inside an awaiting session_before_switch reaches the successor, not the outgoing session");
+{
+	const tag = "mid-switch";
+	let attach;
+	const attached = new Promise((resolve) => { attach = resolve; });
+	let seat;
+	// Stands in for an extension whose `session_before_switch` awaits (a confirm dialog); the child settles inside it.
+	const provider = (pi) => {
+		scriptedProvider(pi);
+		pi.on("session_before_switch", async () => {
+			(await attached).end();
+			await until(() => seat.events.some((e) => e.channel === "subagents:completed" && e.name === tag), 5000);
+			for (let tick = 0; tick < 5; tick++) await new Promise((resolve) => setImmediate(resolve));
+			return undefined;
+		});
+	};
+	seat = await mainSeat({ provider });
+	const old = seat.session();
+	const oldId = old.sessionId;
+	scriptFor(`Spawn the ${tag} child`, [[call("Agent", { description: "settles mid-switch", prompt: `${tag} child works`, name: tag })], [text(DOC)], [text("answered in the old session")]]);
+	scriptFor(`${tag} child works`, [{ content: [text(`${tag} child done`)], live: { attach } }]);
+	scriptFor("Continue session", [[text("continued")], [text("continued again")]]);
+	const before = requests.length;
+	await old.prompt(`Spawn the ${tag} child`);
+	await until(() => seat.session() !== old, 8000);
+	const fresh = seat.session();
+	await until(() => requests.some((r) => r.sessionId === fresh.sessionId), 5000);
+	await fresh.waitForIdle();
+	const carries = (r) => JSON.stringify(r.messages).includes(`${tag} child done`);
+	const inOld = requests.slice(before).filter((r) => r.sessionId === oldId && carries(r)).length;
+	const inFresh = requests.filter((r) => r.sessionId === fresh.sessionId && carries(r));
+	check("the outgoing session starts no turn for it", inOld === 0, `${inOld} old-session requests carry it`);
+	check("the successor gets it once, in the continuation's turn", inFresh.length > 0 && userTextsOf(inFresh[0]).some((t) => t.startsWith("Continue session `")) && conversationOf(inFresh.at(-1)).filter((m) => JSON.stringify(m).includes(`${tag} child done`)).length === 1, `${inFresh.length} fresh requests carry it`);
+	fresh.dispose();
+}
+
+// An `agent_settled` handler that awaits, loaded after continue-session: pi
+// defers a turn started during that emission (`_deferredSettledActions`) and
+// runs it after the handoff command it deferred first, in the outgoing session,
+// so the result was answered there and delivered again in the successor.
+console.log("\na result that settles inside a later agent_settled handler after the document is answered once, in the successor");
+{
+	const tag = "mid-settle";
+	let attach;
+	const attached = new Promise((resolve) => { attach = resolve; });
+	let seat;
+	let armed = true;
+	const provider = (pi) => {
+		scriptedProvider(pi);
+		pi.on("agent_settled", async () => {
+			if (!armed || seat === undefined) return;
+			armed = false;
+			(await attached).end();
+			await until(() => seat.events.some((e) => e.channel === "subagents:completed" && e.name === tag), 5000);
+			for (let tick = 0; tick < 5; tick++) await new Promise((resolve) => setImmediate(resolve));
+		});
+	};
+	seat = await mainSeat({ provider });
+	const old = seat.session();
+	const oldId = old.sessionId;
+	scriptFor(`Spawn the ${tag} child`, [[call("Agent", { description: "settles mid-settle", prompt: `${tag} child works`, name: tag })], [text(DOC)], [text("answered in the old session")]]);
+	scriptFor(`${tag} child works`, [{ content: [text(`${tag} child done`)], live: { attach } }]);
+	scriptFor("Continue session", [[text("continued")], [text("continued again")]]);
+	const before = requests.length;
+	await old.prompt(`Spawn the ${tag} child`);
+	await until(() => seat.session() !== old, 8000);
+	const fresh = seat.session();
+	await until(() => requests.some((r) => r.sessionId === fresh.sessionId), 5000);
+	await fresh.waitForIdle();
+	const carries = (r) => JSON.stringify(r.messages).includes(`${tag} child done`);
+	const inOld = requests.slice(before).filter((r) => r.sessionId === oldId && carries(r)).length;
+	const inFresh = requests.filter((r) => r.sessionId === fresh.sessionId && carries(r));
+	check("the outgoing session starts no turn for it", inOld === 0, `${inOld} old-session requests carry it`);
+	check("the successor gets it once, in the continuation's turn", inFresh.length > 0 && userTextsOf(inFresh[0]).some((t) => t.startsWith("Continue session `")) && conversationOf(inFresh.at(-1)).filter((m) => JSON.stringify(m).includes(`${tag} child done`)).length === 1, `${inFresh.length} fresh requests carry it`);
+	fresh.dispose();
+}
+
+// A result handed to a run in flight as a follow-up is `handed` in its record
+// until a turn start sees its notification in the file. The successor's file
+// has no notification, so its first turn took the result as never delivered.
+console.log("\na result answered in the old session before the document is not delivered again in the successor");
+{
+	const tag = "handed-mid-run";
+	let attachChild;
+	let attachParent;
+	const childLive = new Promise((resolve) => { attachChild = resolve; });
+	const parentLive = new Promise((resolve) => { attachParent = resolve; });
+	const seat = await mainSeat();
+	const old = seat.session();
+	const oldId = old.sessionId;
+	scriptFor(`Spawn the ${tag} child`, [[call("Agent", { description: "handed mid run", prompt: `${tag} child works`, name: tag })], { content: [text("parent keeps working")], live: { attach: attachParent } }, [text(DOC)]]);
+	scriptFor(`${tag} child works`, [{ content: [text(`${tag} child done`)], live: { attach: attachChild } }]);
+	scriptFor("Continue session", [[text("continued")], [text("continued again")]]);
+	const before = requests.length;
+	const running = old.prompt(`Spawn the ${tag} child`);
+	const parent = await parentLive;
+	(await childLive).end();
+	await until(() => seat.events.some((e) => e.channel === "subagents:completed" && e.name === tag), 5000);
+	await sleep(50);
+	parent.end();
+	await running;
+	await until(() => seat.session() !== old, 8000);
+	const fresh = seat.session();
+	await until(() => requests.some((r) => r.sessionId === fresh.sessionId), 5000);
+	await fresh.waitForIdle();
+	const carries = (r) => JSON.stringify(r.messages).includes(`${tag} child done`);
+	const inOld = requests.slice(before).filter((r) => r.sessionId === oldId && carries(r)).length;
+	const inFresh = requests.filter((r) => r.sessionId === fresh.sessionId && carries(r)).length;
+	check("the old session answered it before its document", inOld > 0, `${inOld} old-session requests carry it`);
+	check("the successor does not get it again", inFresh === 0, `${inOld} old, ${inFresh} fresh`);
+	const readBys = entriesOf(fresh.sessionFile).filter((e) => e.customType === "agent-record" && e.data?.name === tag && e.data.status === "completed").map((e) => e.data.readBy ?? "unread");
+	check("and the records the handoff carried say the conversation read it, never handed", readBys.at(-1) === "conversation" && !readBys.includes("handed"), readBys.join(","));
+	fresh.dispose();
+}
+
+console.log("\na notification entry the file holds malformed is read as no result");
+{
+	const { AGENT_NOTIFICATION_TYPE, deliveredAgentTaskIds } = await jiti.import(`${ROOT}/lib/agent-notification.ts`);
+	const entry = (content) => ({ type: "custom_message", customType: AGENT_NOTIFICATION_TYPE, content });
+	let ids;
+	try {
+		ids = [...deliveredAgentTaskIds([entry([null, 7, { type: "text", text: 3 }, { type: "text", text: "<task-id>kept</task-id>" }])])];
+	} catch (error) {
+		ids = [`threw: ${error.message}`];
+	}
+	check("a null, a number or a non-string text block is skipped; a text block still counts", ids.join() === "kept", ids.join());
+}
+
+// The document is written at a turn end; a result queued behind that turn runs
+// as the next one, and pi files its notification before the request. That
+// request killed by Esc answered nothing, so the successor must still get it.
+console.log("\na result whose turn after the document is aborted is delivered in the successor");
+{
+	const tag = "after-doc-aborted";
+	let attachChild;
+	let attachParent;
+	let attachFollow;
+	const childLive = new Promise((resolve) => { attachChild = resolve; });
+	const parentLive = new Promise((resolve) => { attachParent = resolve; });
+	const followLive = new Promise((resolve) => { attachFollow = resolve; });
+	const seat = await mainSeat();
+	const old = seat.session();
+	const oldId = old.sessionId;
+	scriptFor(`Spawn the ${tag} child`, [[call("Agent", { description: "settles behind the document", prompt: `${tag} child works`, name: tag })], { content: [text(DOC)], live: { attach: attachParent } }, { content: [text("never finished")], live: { attach: attachFollow } }]);
+	scriptFor(`${tag} child works`, [{ content: [text(`${tag} child done`)], live: { attach: attachChild } }]);
+	scriptFor("Continue session", [[text("continued")], [text("continued again")]]);
+	const running = old.prompt(`Spawn the ${tag} child`);
+	const parent = await parentLive;
+	(await childLive).end();
+	await until(() => seat.events.some((e) => e.channel === "subagents:completed" && e.name === tag), 5000);
+	await sleep(50);
+	parent.end();
+	await followLive;
+	const filed = entriesOf(old.sessionFile).some((e) => e.type === "custom_message" && JSON.stringify(e.content ?? "").includes(`${tag} child done`));
+	await old.abort();
+	await running;
+	await until(() => seat.session() !== old, 8000);
+	const fresh = seat.session();
+	await until(() => requests.some((r) => r.sessionId === fresh.sessionId), 5000);
+	await fresh.waitForIdle();
+	const inFresh = requests.filter((r) => r.sessionId === fresh.sessionId && JSON.stringify(r.messages).includes(`${tag} child done`)).length;
+	check("its notification was filed in the old session before the aborted request", filed, String(filed));
+	check("the successor gets it", inFresh > 0, `${inFresh} fresh requests carry it (old ${oldId})`);
+	fresh.dispose();
+}
+
+// ---------------------------------------------------------------------------
+// Retire: a shutdown nothing follows stops the runs while the seat can still
+// write, so the file says `stopped` with the final cost and the worktree
+// outcome instead of a `running` the fold later reads as `lost`.
+// ---------------------------------------------------------------------------
+const { liveAgentCount: liveCount } = await jiti.import(`${ROOT}/lib/agent-live-count.ts`);
+const { PARK_DEADLINE_MS, parkAgentRuntime } = await jiti.import(`${ROOT}/lib/agent-runtime-handover.ts`);
+const lastRecordOf = (file, name) => entriesOf(file).filter((e) => e.customType === "agent-record" && e.data?.name === name).at(-1)?.data;
+/** A throwaway repository, so a worktree child's branch and directory never touch the kit's own. */
+function tempRepo() {
+	const repo = fs.mkdtempSync(path.join(os.tmpdir(), "continue-session-repo-"));
+	const git = (...args) => execSync(`git ${args.join(" ")}`, { cwd: repo, stdio: "pipe" });
+	git("init", "-q");
+	fs.writeFileSync(path.join(repo, "notes.txt"), "notes\n");
+	git("add", "notes.txt");
+	git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init");
+	return repo;
+}
+
+console.log("\nquit and /new stop a live worktree child: stopped, final cost, worktree settled");
+for (const via of ["quit", "new"]) {
+	console.log(`  -- via ${via}`);
+	const tag = `retire-${via}`;
+	const repo = tempRepo();
+	let attach;
+	const attached = new Promise((resolve) => { attach = resolve; });
+	const seat = await mainSeat({ cwd: repo });
+	const main = seat.session();
+	const file = main.sessionFile;
+	scriptFor(`Spawn the ${tag} child`, [[call("Agent", { description: "works in a worktree", prompt: `${tag} child works`, name: tag, isolation: "worktree" })], [text("spawned")]]);
+	scriptFor(`${tag} child works`, [[call("read", { path: "notes.txt" })], { content: [text("never finished")], live: { attach } }]);
+	await main.prompt(`Spawn the ${tag} child`);
+	await Promise.race([attached, sleep(8000)]);
+	const worktree = lastRecordOf(file, tag)?.cwd;
+	if (via === "quit") await seat.runtime.dispose();
+	else await seat.runtime.newSession({});
+	const record = lastRecordOf(file, tag);
+	check(`${via}: the child's last record in the old file reads stopped, by shutdown`, record?.status === "stopped" && record.stoppedBy === "shutdown", `${record?.status} by ${record?.stoppedBy}`);
+	check(`${via}: with its final cost`, record?.costUsd > 0, String(record?.costUsd));
+	check(`${via}: and its worktree settled: removed, and the result says so`, worktree !== undefined && worktree !== repo && !fs.existsSync(worktree) && /Worktree on branch `agent\/[^`]+` had no changes and was removed\./.test(record?.result ?? ""), `${worktree} exists ${worktree !== undefined && fs.existsSync(worktree)}; result ${JSON.stringify(record?.result)}`);
+	check(`${via}: nothing of it is live afterwards`, await until(() => liveCount() === 0, 3000), String(liveCount()));
+	if (via === "new") seat.session().dispose();
+	fs.rmSync(repo, { recursive: true, force: true });
+}
+
+console.log("\na child that ignores abort is cut off at the bound");
+{
+	const tag = "deaf-child";
+	let attach;
+	const attached = new Promise((resolve) => { attach = resolve; });
+	const seat = await mainSeat();
+	const main = seat.session();
+	const file = main.sessionFile;
+	const runtime = seam.agentRuntimeOf(main.sessionId);
+	scriptFor(`Spawn the ${tag}`, [[call("Agent", { description: "ignores abort", prompt: `${tag} works`, name: tag })], [text("spawned")]]);
+	scriptFor(`${tag} works`, [{ content: [text("late words")], live: { attach }, ignoreAbort: true }]);
+	await main.prompt(`Spawn the ${tag}`);
+	const controls = await Promise.race([attached, sleep(8000)]);
+	const started = Date.now();
+	const quit = await Promise.race([seat.runtime.dispose().then(() => "returned"), sleep(6000).then(() => "hung")]);
+	const took = Date.now() - started;
+	const record = lastRecordOf(file, tag);
+	check("quit returns at the bound, not never", quit === "returned" && took >= 1500 && took < 4000, `${quit} after ${took}ms`);
+	check("stopped is written for the straggler", record?.status === "stopped" && record.stoppedBy === "shutdown", `${record?.status} by ${record?.stoppedBy}`);
+	let refusal = "";
+	try { runtime?.host.model(); } catch (error) { refusal = error.message; }
+	check("and the link is retired", /is retired/.test(refusal), refusal);
+	const bytes = fs.readFileSync(file);
+	controls?.end();
+	await until(() => liveCount() === 0, 3000);
+	await sleep(100);
+	check("the straggler's own late settle writes nothing", fs.readFileSync(file).equals(bytes));
+}
+
+console.log("\nthe unclaimed handover deadline writes nothing");
+{
+	const tag = "unclaimed-child";
+	let attach;
+	const attached = new Promise((resolve) => { attach = resolve; });
+	const seat = await mainSeat();
+	const main = seat.session();
+	const file = main.sessionFile;
+	const runtime = seam.agentRuntimeOf(main.sessionId);
+	scriptFor(`Spawn the ${tag}`, [[call("Agent", { description: "parked, never claimed", prompt: `${tag} works`, name: tag })], [text("spawned")]]);
+	scriptFor(`${tag} works`, [{ content: [text("never read")], live: { attach } }]);
+	await main.prompt(`Spawn the ${tag}`);
+	await Promise.race([attached, sleep(8000)]);
+	const bytes = fs.readFileSync(file);
+	const eventsBefore = seat.events.length;
+	// The deadline's own timer, fired now rather than slept through.
+	const realSetTimeout = globalThis.setTimeout;
+	let deadline;
+	globalThis.setTimeout = (fn, ms, ...rest) => (ms === PARK_DEADLINE_MS ? ((deadline = fn), realSetTimeout(() => {}, 0)) : realSetTimeout(fn, ms, ...rest));
+	try { parkAgentRuntime(path.join(AGENT_DIR, "never-opened.jsonl"), runtime); } finally { globalThis.setTimeout = realSetTimeout; }
+	deadline?.();
+	const stopped = await until(() => liveCount() === 0, 5000);
+	await sleep(200);
+	check("the deadline stopped the child", deadline !== undefined && stopped, `deadline ${deadline !== undefined}, ${liveCount()} live`);
+	check("and wrote nothing: the session file is byte-unchanged", fs.readFileSync(file).equals(bytes), `${bytes.length} -> ${fs.statSync(file).size} bytes`);
+	check("and told the dock nothing", seat.events.length === eventsBefore, seat.events.slice(eventsBefore).map((e) => e.channel).join(","));
+	main.dispose();
+}
+
+console.log("\na workflow's child is carried across a handoff like any run");
+{
+	const tag = "wf-carried";
+	let attach;
+	const attached = new Promise((resolve) => { attach = resolve; });
+	const seat = await mainSeat();
+	const old = seat.session();
+	scriptFor(`Hand off with a ${tag} child`, [[text(DOC)]]);
+	scriptFor(`${tag} works`, [{ content: [text(`${tag} done`)], live: { attach } }]);
+	scriptFor("Continue session", [[text("continued")], [text("continued again")]]);
+	// Spawned the way the `Workflow` tool spawns: through the published runtime, as a workflow child.
+	const record = await seam.agentRuntimeOf(old.sessionId).spawn({ description: "a workflow's agent", prompt: `${tag} works`, name: tag, workflowChild: true });
+	const controls = await Promise.race([attached, sleep(8000)]);
+	await old.prompt(`Hand off with a ${tag} child`);
+	await until(() => seat.session() !== old, 8000);
+	const fresh = seat.session();
+	await fresh.waitForIdle();
+	const runtime = seam.agentRuntimeOf(fresh.sessionId);
+	check("the new session's runtime holds it, still running", runtime?.registry.byTaskId(record.taskId)?.status === "running" && runtime.liveTaskIds().includes(record.taskId), `${runtime?.registry.byTaskId(record.taskId)?.status}`);
+	controls?.end();
+	const settled = await until(() => lastRecordOf(fresh.sessionFile, tag)?.status === "completed", 5000);
+	const final = lastRecordOf(fresh.sessionFile, tag);
+	check("it completes in the new session, its result the spawner's", settled && final.result === `${tag} done` && final.readBy === "spawner" && final.ownerSessionId === fresh.sessionId, JSON.stringify(final && { status: final.status, readBy: final.readBy }));
+	check("and it never enters the new session's conversation", !requests.filter((r) => r.sessionId === fresh.sessionId).some((r) => JSON.stringify(r.messages).includes(`${tag} done`)));
+	fresh.dispose();
+}
+
+// ---------------------------------------------------------------------------
+// Every timer, reply and long await of an extension lives on its session
+// scope, so nothing a runtime started reaches pi after its session ends.
+// ---------------------------------------------------------------------------
+const { claimScreen: claimNoticeScreen, noticeSinkDir } = await jiti.import(`${ROOT}/lib/notice.ts`);
+const STALE = "extension ctx is stale";
+/** A scripted stream the test ends by hand; `attached` resolves with its controls once the provider streams it. */
+const liveStreamOf = () => {
+	let attach;
+	const attached = new Promise((resolve) => { attach = resolve; });
+	return { attached, attach };
+};
+/**
+ * Records the stack of every call into a stale runtime, including the ones an
+ * extension swallows: every runner bound while it is installed, a child's too.
+ * Returns the uninstall.
+ */
+const traceStaleCalls = (sink) => {
+	const bindCore = ExtensionRunner.prototype.bindCore;
+	ExtensionRunner.prototype.bindCore = function (...args) {
+		for (const target of [this, this.runtime]) {
+			const assert = target.assertActive.bind(target);
+			target.assertActive = () => {
+				try { assert(); } catch (error) { sink.push(new Error("stale").stack); throw error; }
+			};
+		}
+		return bindCore.apply(this, args);
+	};
+	return () => { ExtensionRunner.prototype.bindCore = bindCore; };
+};
+/** Everything a stale call could leave behind: its stack, a throw, stderr, a notice, a session or notice file. */
+async function watchForStale(body) {
+	const seen = { calls: [], thrown: [], stderr: [], said: [] };
+	const onThrow = (error) => seen.thrown.push(String(error?.stack ?? error));
+	process.on("uncaughtException", onThrow);
+	process.on("unhandledRejection", onThrow);
+	const write = process.stderr.write;
+	process.stderr.write = function (chunk, ...rest) { seen.stderr.push(String(chunk)); return write.call(this, chunk, ...rest); };
+	const release = claimNoticeScreen((message) => seen.said.push(message));
+	const untrace = traceStaleCalls(seen.calls);
+	try {
+		await body();
+	} finally {
+		untrace();
+		release();
+		process.stderr.write = write;
+		process.off("uncaughtException", onThrow);
+		process.off("unhandledRejection", onThrow);
+	}
+	const files = [process.env.PI_CODING_AGENT_SESSION_DIR, noticeSinkDir()].flatMap((dir) => (fs.existsSync(dir) ? fs.readdirSync(dir, { recursive: true }).map((name) => path.join(dir, name)) : []));
+	const staleFiles = files.filter((file) => fs.statSync(file).isFile() && fs.readFileSync(file, "utf8").includes(STALE));
+	const lines = [...seen.thrown, ...seen.stderr, ...seen.said].filter((line) => line.includes(STALE));
+	return { calls: seen.calls, lines, staleFiles };
+}
+const staleReport = ({ calls, lines, staleFiles }) => `${calls.length} stale calls${calls[0] ? `, first at:\n${calls[0].split("\n").slice(2, 8).map((l) => `         ${l.trim()}`).join("\n")}` : ""}; ${lines.length} lines (${lines[0]?.split("\n")[0]?.slice(0, 120) ?? ""}); files ${staleFiles.join(", ")}`;
+
+console.log("\nno extension ctx is stale across /new, a handoff, reload and quit with work in flight");
+{
+	process.env.PI_KIT_BACKGROUND_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "continue-session-background-"));
+	// The watchdog's warning is the pending timer: armed by the seat's own run, due after the switch.
+	process.env.PI_WATCHDOG_MS = "1500";
+	process.env.PI_WATCHDOG_MODE = "warn";
+	const extensions = ["agent-engine", "continue-session", "wire", "bash", "watchdog", "session-mode", "btw", "workflow", "agent-dock/index", "zen-chrome/index"].map((name) => `${ROOT}/extensions/${name}.ts`);
+	for (const via of ["new", "handoff", "reload", "quit", "quit as the handoff document lands"]) {
+		const tag = `stale-${via.replaceAll(" ", "-")}`;
+		const child = liveStreamOf();
+		const own = liveStreamOf();
+		const found = await watchForStale(async () => {
+			const seat = await wireSeat({ extensions });
+			const old = seat.session();
+			const handsOff = via === "handoff" || via.startsWith("quit as");
+			const ownLive = !handsOff;
+			scriptFor(`Start the ${tag} work`, [[call("Agent", { description: "streams", prompt: `${tag} child streams`, name: tag }), call("bash", { command: "sleep 0.4; echo slept", run_in_background: true })], handsOff ? [text(DOC)] : { content: [text("still streaming")], live: own }]);
+			scriptFor(`${tag} child streams`, [{ content: [text(`${tag} child done`)], live: child }]);
+			scriptFor("Continue session", [[text("continued")], [text("continued again")]]);
+			const prompted = old.prompt(`Start the ${tag} work`);
+			await child.attached;
+			if (ownLive) await own.attached;
+			else await prompted;
+			if (via === "new") await seat.runtime.newSession({});
+			else if (via === "handoff") await until(() => seat.session() !== old, 8000);
+			else if (via === "reload") await old.reload();
+			else await seat.runtime.dispose();
+			(await child.attached).end();
+			if (ownLive) (await own.attached).end();
+			await prompted.catch(() => {});
+			// Past the background command, the watchdog's warning and a macrotask of slack.
+			await sleep(1800);
+			if (!via.startsWith("quit")) await seat.runtime.dispose();
+		});
+		check(`${via}: nothing reaches a stale runtime`, found.calls.length === 0 && found.lines.length === 0 && found.staleFiles.length === 0, staleReport(found));
+	}
+	delete process.env.PI_WATCHDOG_MS;
+	delete process.env.PI_WATCHDOG_MODE;
+	fs.rmSync(process.env.PI_KIT_BACKGROUND_DIR, { recursive: true, force: true });
+	delete process.env.PI_KIT_BACKGROUND_DIR;
+}
+
+console.log("\na quit mid-compaction");
+{
+	const summary = liveStreamOf();
+	const seat = await mainSeat();
+	const session = seat.session();
+	// Two turns past pi's 20k-token keep-recent window, so the first has something to summarise.
+	const filler = "words ".repeat(20_000);
+	scriptFor("compact-me", [[text("noted")], { content: [text("the summary")], live: summary }]);
+	scriptFor("more", [[text("noted too")]]);
+	await session.prompt(`compact-me ${filler}`);
+	await session.prompt(`more ${filler}`);
+	const compacting = session.compact().catch(() => {});
+	await summary.attached;
+	const startedAt = Date.now();
+	await seat.runtime.dispose();
+	const took = Date.now() - startedAt;
+	await compacting;
+	// No run settles a compaction: waiting for one held quit for the whole settle bound.
+	check("waits for the compaction's end, not the settle bound", took < 1000, `${took}ms`);
+}
+
+console.log("\nthe dock's stop reply after quit");
+{
+	const tag = "stop-after-quit";
+	const child = liveStreamOf();
+	let bus;
+	const found = await watchForStale(async () => {
+		const seat = await mainSeat({ provider: (pi) => { scriptedProvider(pi); bus = pi.events; } });
+		const main = seat.session();
+		scriptFor(`Spawn the ${tag} child`, [[call("Agent", { description: "ignores abort", prompt: `${tag} works`, name: tag })], [text("spawned")]]);
+		scriptFor(`${tag} works`, [{ content: [text("late words")], live: child, ignoreAbort: true }]);
+		await main.prompt(`Spawn the ${tag} child`);
+		const controls = await child.attached;
+		// The stop is still waiting on a child that ignores its abort when quit invalidates the seat.
+		bus.emit("subagents:rpc:stop", { requestId: tag, agentId: tag });
+		await seat.runtime.dispose();
+		controls.end();
+		await until(() => liveCount() === 0, 3000);
+		await sleep(100);
+	});
+	check("a stop that resolves after quit replies to no one", found.calls.length === 0 && found.lines.length === 0, staleReport(found));
 }
 
 trailer();

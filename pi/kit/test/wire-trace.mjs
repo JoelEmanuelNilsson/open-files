@@ -343,7 +343,7 @@ console.log("\nwire: the trace rides along without touching the wire");
 	const wireMod = await jiti.import(`${ROOT}/extensions/wire.ts?trace`);
 	const handlers = new Map();
 	const commands = new Map();
-	wireMod.default({ on: (e, h) => handlers.set(e, h), registerCommand: (n, o) => commands.set(n, o) });
+	wireMod.default({ events: { on: () => () => {}, emit: () => {} }, on: (e, h) => handlers.set(e, h), registerCommand: (n, o) => commands.set(n, o) });
 	const notices = [];
 	const ctx = {
 		cwd: process.cwd(),
@@ -411,6 +411,7 @@ console.log("\nwire: the model on the wire, read and never rewritten");
 		// on, so this seat reaches the instruments the block above stops short of —
 		// hence the three `pi` readers and `getSystemPrompt`.
 		mod.default({
+			events: { on: () => () => {}, emit: () => {} },
 			on: (e, h) => handlers.set(e, h),
 			registerCommand: () => {},
 			getAllTools: () => [],

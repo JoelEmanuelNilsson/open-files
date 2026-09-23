@@ -39,7 +39,7 @@ import {
 	toCells,
 } from "./animate.ts";
 import { HOME_GLYPH } from "../../lib/home-glyph.ts";
-import { activeForeground, lerp, luminance } from "../../lib/rgb.ts";
+import { activeForeground, type Foreground, lerp, luminance } from "../../lib/rgb.ts";
 import { glowName } from "./choice.ts";
 import { slotColors } from "../../lib/slot-colors.ts";
 
@@ -346,6 +346,68 @@ function toRgb(c: Vec3): Rgb {
 	return { r: enc(c.x), g: enc(c.y), b: enc(c.z) };
 }
 
+/** Magenta, the middle of the arc: text tints are held at the lightness it has. */
+const EVEN_HUE = 320;
+
+/**
+ * The colour text is tinted toward: `hue` at saturation `s` and value `v`, moved
+ * to the OKLab lightness magenta has at that saturation and value.
+ *
+ * HSV holds value, not lightness. At the same saturation and value, the gold
+ * and green end of the arc is 0.15 to 0.2 OKLab lightness above the blue and
+ * violet end, so a tint sweeping into yellow flared rather than changed colour
+ * (2026-09-23). Held level, only the hue moves.
+ */
+function evenInk(hue: number, s: number, v: number): Rgb {
+	return toRgb(atLightness(hsv(hue, s, v), oklab(hsv(EVEN_HUE, s, v)).x));
+}
+
+/** Linear sRGB to OKLab, as (L, a, b). */
+function oklab(c: Vec3): Vec3 {
+	const l = Math.cbrt(0.4122214708 * c.x + 0.5363325363 * c.y + 0.0514459929 * c.z);
+	const m = Math.cbrt(0.2119034982 * c.x + 0.6806995451 * c.y + 0.1073969566 * c.z);
+	const s = Math.cbrt(0.0883024619 * c.x + 0.2817188376 * c.y + 0.6299787005 * c.z);
+	return v3(
+		0.2104542553 * l + 0.793617785 * m - 0.0040720718 * s,
+		1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s,
+		0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s,
+	);
+}
+
+/** OKLab (L, a, b) to linear sRGB, which may fall outside 0..1. */
+function fromOklab(c: Vec3): Vec3 {
+	const l = (c.x + 0.3963377774 * c.y + 0.2158037573 * c.z) ** 3;
+	const m = (c.x - 0.1055613458 * c.y - 0.0638541728 * c.z) ** 3;
+	const s = (c.x - 0.0894841775 * c.y - 1.291485548 * c.z) ** 3;
+	return v3(
+		4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+		-1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+		-0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s,
+	);
+}
+
+/**
+ * `c` at OKLab lightness `lightness`, keeping its hue, and its chroma as far as
+ * the screen can show at that lightness.
+ */
+function atLightness(c: Vec3, lightness: number): Vec3 {
+	const { y: a, z: b } = oklab(c);
+	const at = (k: number) => fromOklab(v3(lightness, a * k, b * k));
+	const shows = (k: number) => {
+		const out = at(k);
+		return [out.x, out.y, out.z].every((u) => u >= 0 && u <= 1);
+	};
+	if (shows(1)) return at(1);
+	let lo = 0;
+	let hi = 1;
+	for (let i = 0; i < 12; i++) {
+		const mid = (lo + hi) / 2;
+		if (shows(mid)) lo = mid;
+		else hi = mid;
+	}
+	return at(lo);
+}
+
 /** Lamps enough to space them out, within what a rail that short can hold. */
 function lampCount(lap: number, spacing: number): number {
 	return clamp(Math.round(lap / spacing), MIN_LAMPS, MAX_LAMPS);
@@ -378,7 +440,24 @@ export interface Light {
 	 * speed is capped so its lamps stay sample-able at that rate.
 	 */
 	readonly frameMs: number;
+	/**
+	 * The saturation a lit glyph rests at between lamps, in the lamps' own hue;
+	 * absent, it rests at its own colour. See `PASTEL`.
+	 */
+	readonly pastel?: number;
 }
+
+/**
+ * Where no lamp reaches, text under a pastel light is a paler shade of the hue
+ * the lamps either side of it blend to, not its own colour.
+ *
+ * A glyph resting at its own colour between lamps is right for dim text and
+ * wrong for bright text: a tool row's cream, or the folded bar's rule and model
+ * in the terminal's white slot, came through between the pools as white bands
+ * (2026-09-23). And a fixed resting colour in their place puts a plateau
+ * between every two lamps, so the colours stop running into each other.
+ */
+const PASTEL = 0.42;
 
 /**
  * The box outline, in the two lights it can carry. `/glow` picks; `choice.ts`
@@ -462,7 +541,13 @@ export const ROW_LIGHT: Light = {
  * expanded call's header. 40% slower than a task row: it is read, not glanced
  * at, and at the row's tempo the words were hard to hold.
  */
-export const CALL_LIGHT: Light = { ...ROW_LIGHT, tempo: 1.8, frameMs: FRAME_MS };
+export const CALL_LIGHT: Light = { ...ROW_LIGHT, tempo: 1.8, frameMs: FRAME_MS, pastel: PASTEL };
+
+/**
+ * The prompt box folded to one or two rows: a task row's light, pastel between
+ * lamps, because the rule and the model name rest in the terminal's white slot.
+ */
+export const FOLDED_BAR_LIGHT: Light = { ...ROW_LIGHT, pastel: PASTEL };
 
 /**
  * Seconds per lap: what the tuning asks for, or slower if that would outrun the
@@ -511,6 +596,21 @@ function pigmentAt(s: number, t: number, rail: Rail, light: Light): { hue: numbe
 	return { hue: hueSum / weight, depth: nearest ** light.focus };
 }
 
+// A line lit every frame hands in the same few styles each time, so their
+// reading is kept. Only the reading: a slot is looked up in the palette live,
+// because an appearance flip changes what the slot is.
+const FOREGROUNDS = new Map<string, Foreground>();
+const FOREGROUNDS_MAX = 256;
+
+function foregroundOf(sgr: string): Foreground {
+	const known = FOREGROUNDS.get(sgr);
+	if (known !== undefined) return known;
+	if (FOREGROUNDS.size >= FOREGROUNDS_MAX) FOREGROUNDS.clear();
+	const front = activeForeground(sgr);
+	FOREGROUNDS.set(sgr, front);
+	return front;
+}
+
 /**
  * The colour a painted cell rests at: truecolour as written, indexed via the
  * terminal's palette, null for a glyph left in the terminal's own foreground.
@@ -522,7 +622,7 @@ function pigmentAt(s: number, t: number, rail: Rail, light: Light): { hue: numbe
  * the answer; see `activeForeground`.
  */
 export function restOf(sgr: string): Rgb | null {
-	const front = activeForeground(sgr);
+	const front = foregroundOf(sgr);
 	if (front.kind === "rgb") return front.color;
 	if (front.kind === "index") return slotColors().get(front.index) ?? null;
 	return null;
@@ -590,7 +690,7 @@ export function shadeBox(lines: string[], t: number, opts: BoxOptions = {}): str
 				const tints = !replaces && tint !== undefined && tint(cell.ch);
 				if (!replaces && !tints) return cell;
 				const { hue, depth } = pigmentAt(rail.arc(x, y * ASPECT), t, rail, light);
-				if (tints) return tinted(cell, restOf(cell.sgr), hue, depth, 1 - clamp(fade, 0, 1), here);
+				if (tints) return tinted(cell, restOf(cell.sgr), hue, depth, 1 - clamp(fade, 0, 1), here, light.pastel);
 				const value = here.floor + (here.value - here.floor) * depth;
 				const lit = toRgb(hsv(hue, SATURATION, value));
 				if (fade <= 0) return { ch: cell.ch, sgr: fg(lit) };
@@ -655,7 +755,7 @@ export function shadeLine(line: string, t: number, rest: Rgb | "self", opts: Lin
 			const base = rest === "self" ? restOf(cell.sgr) : rest;
 			if (base === null) return cell;
 			const { hue, depth } = pigmentAt(rail.arc(px, 0), t, rail, light);
-			return tinted(cell, base, hue, depth, strength, here);
+			return tinted(cell, base, hue, depth, strength, here, light.pastel);
 		}),
 	);
 }
@@ -669,12 +769,18 @@ export function shadeLine(line: string, t: number, rest: Rgb | "self", opts: Lin
  * lit box all land here, so they cannot pick up three slightly different ideas
  * of what a tint is.
  */
-function tinted(cell: Cell, base: Rgb | null, hue: number, depth: number, strength: number, here: Surface): Cell {
+function tinted(cell: Cell, base: Rgb | null, hue: number, depth: number, strength: number, here: Surface, pastel?: number): Cell {
 	if (base === null) return cell;
-	const ink = toRgb(hsv(hue, SATURATION, here.ink));
+	// Pastel: tinted the whole way along, in the hue the lamps blend to, so the
+	// colour runs on from one lamp to the next; `depth` only saturates it. Not:
+	// tinted as deep as the light reaches, resting at its own colour between.
+	const lit =
+		pastel === undefined
+			? lerp(base, evenInk(hue, SATURATION, here.ink), clamp(depth * TINT * strength, 0, 1))
+			: lerp(base, evenInk(hue, pastel + (SATURATION - pastel) * clamp(depth, 0, 1), here.ink), clamp(TINT * strength, 0, 1));
 	// Appended, not substituted: the glyph keeps its bold and whatever else the
 	// theme set, and the later foreground wins.
-	return { ch: cell.ch, sgr: cell.sgr + fg(lerp(base, ink, clamp(depth * TINT * strength, 0, 1))) };
+	return { ch: cell.ch, sgr: cell.sgr + fg(lit) };
 }
 
 /**

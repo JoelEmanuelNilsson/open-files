@@ -32,13 +32,8 @@ import { showUsageView } from "./ui/usage-view.ts";
 import { computeUsage, toReportedUsage } from "./usage.ts";
 import { notice } from "../../lib/notice.ts";
 import { buildOwnedSystemPrompt } from "../../lib/owned-prompt.ts";
-import { isSideSession } from "../../lib/side-flag.ts";
 
 export default function (pi: ExtensionAPI) {
-	// `/context` is TUI-only, so everything this computes inside btw's child
-	// session — which has no screen — is work nobody can read.
-	if (isSideSession()) return;
-
 	const capture = new InitialCaptureState();
 	// Read-only migration for sessions written before the silent probe was
 	// retired; the identity function for every session written since.

@@ -38,6 +38,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { AGENT_WAIT_TOOL_NAMES } from "../lib/agent-tool-text.ts";
+import { createSessionScope } from "../lib/session-scope.ts";
 import { resolveDeadlineMs } from "../lib/silence-deadline.ts";
 
 /** Warn at a third of the deadline: early enough to act on, late enough to mean something. */
@@ -309,6 +310,7 @@ export function isFailedAssistant(message: unknown): message is FailedAssistant 
 }
 
 export default function (pi: ExtensionAPI) {
+	const scope = createSessionScope(pi);
 	const deadlineMs = resolveDeadlineMs(process.env.PI_WATCHDOG_MS);
 	const forcedMode = process.env.PI_WATCHDOG_MODE;
 	let watchdog: Watchdog | undefined;
@@ -331,11 +333,8 @@ export default function (pi: ExtensionAPI) {
 			deadlineMs,
 			mode,
 			now: () => Date.now(),
-			schedule: (delayMs, fire) => {
-				const timer = setTimeout(fire, delayMs);
-				timer.unref?.();
-				return () => clearTimeout(timer);
-			},
+			// A reload leaves the run going without this runtime, so the clock ends with the scope, not the run.
+			schedule: (delayMs, fire) => scope.timeout(delayMs, fire),
 			act: (action) => {
 				// The authoritative liveness bit, checked at the last possible moment.
 				// If the run settled without its event reaching us there is nothing to
@@ -371,6 +370,26 @@ export default function (pi: ExtensionAPI) {
 		ensure(ctx)?.start();
 	});
 	pi.on("agent_settled", () => watchdog?.stop());
+	// A reload keeps a run going into this instance without an `agent_start` or
+	// the `tool_execution_start` of a tool already running; the branch holds its
+	// call but not yet its result.
+	pi.on("session_start", (event, ctx) => {
+		if (event.reason !== "reload" || ctx.isIdle()) return;
+		const dog = ensure(ctx);
+		if (dog === undefined) return;
+		dog.start();
+		const branch = ctx.sessionManager.getBranch();
+		const answered = new Set<string>();
+		for (let i = branch.length - 1; i >= 0; i--) {
+			const entry = branch[i];
+			if (entry?.type !== "message") continue;
+			const message = entry.message;
+			if (message.role === "toolResult") answered.add(message.toolCallId);
+			if (message.role !== "assistant") continue;
+			for (const block of message.content) if (block.type === "toolCall" && !answered.has(block.id)) dog.toolStart(block.id, block.name);
+			break;
+		}
+	});
 
 	pi.on("agent_end", () => watchdog?.touch());
 	pi.on("turn_start", () => watchdog?.touch());

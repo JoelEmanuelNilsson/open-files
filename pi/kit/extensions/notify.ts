@@ -26,7 +26,6 @@
 import { execFile } from "node:child_process";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { terminalWrite } from "../lib/notice.ts";
-import { isSideSession } from "../lib/side-flag.ts";
 import { elapsedMs, ownsTurnClock, readTurnClock } from "../lib/turn-clock.ts";
 
 type Mode = "osc777" | "kitty" | "osascript" | "bell" | "off";
@@ -131,9 +130,6 @@ function lastAssistantText(messages: Array<{ role?: string; content?: unknown }>
 }
 
 export default function (pi: ExtensionAPI) {
-	// A side thread finishing is not "pi is waiting for you".
-	if (isSideSession()) return;
-
 	let lastMessages: Array<{ role?: string; content?: unknown }> = [];
 	let muted = false;
 

@@ -372,8 +372,12 @@ export const CACHE_MODE_ENTRY = "cache-mode";
  * open question 6 — a fork's inherited records are deliberately not its
  * own), in file order so latest-wins folds the same way; then the latest
  * cache-mode choice. Records owned by another session are not carried.
+ * A `handed` result whose task id is in `answered` (its notification was in
+ * the old file when the continuation was decided) is carried as read by the
+ * conversation: the successor's file holds no notification, so a `handed`
+ * mark there would read as never delivered and be delivered again.
  */
-export function carriedEntries(entries: ReadonlyArray<SessionEntryShape>, oldOwnerSessionId: string, newOwnerSessionId: string): CarriedEntry[] {
+export function carriedEntries(entries: ReadonlyArray<SessionEntryShape>, oldOwnerSessionId: string, newOwnerSessionId: string, answered: ReadonlySet<string>): CarriedEntry[] {
 	const carried: CarriedEntry[] = [];
 	let cacheMode: CarriedEntry | undefined;
 	for (const entry of entries) {
@@ -381,7 +385,8 @@ export function carriedEntries(entries: ReadonlyArray<SessionEntryShape>, oldOwn
 		if (entry.customType === AGENT_RECORD_ENTRY) {
 			const record = parseAgentRecord(entry.data);
 			if (record === undefined || record.ownerSessionId !== oldOwnerSessionId) continue;
-			carried.push({ customType: AGENT_RECORD_ENTRY, data: { ...record, ownerSessionId: newOwnerSessionId } });
+			const readBy = record.readBy === "handed" && answered.has(record.taskId) ? "conversation" : record.readBy;
+			carried.push({ customType: AGENT_RECORD_ENTRY, data: { ...record, ownerSessionId: newOwnerSessionId, readBy } });
 		} else if (entry.customType === CACHE_MODE_ENTRY) {
 			cacheMode = { customType: CACHE_MODE_ENTRY, data: entry.data };
 		}

@@ -231,7 +231,8 @@ function isAgentStatus(value: unknown): value is AgentStatus {
 
 /**
  * The in-memory registry for one owner, backed by a persist callback so every
- * change is one entry in the session file. Latest wins by name; every run
+ * change is one entry in the session file; where that entry goes is the
+ * caller's (the runtime routes it through its link to the session). Latest wins by name; every run
  * ever made stays reachable by `taskId` for the dock's stop button.
  */
 export class AgentRegistry {
@@ -241,19 +242,13 @@ export class AgentRegistry {
 
 	constructor(persist: (record: AgentRecord) => void, initial?: Iterable<AgentRecord>) {
 		this.#persist = persist;
-		for (const record of initial ?? []) {
-			this.#byName.set(record.name, record);
-			this.#byTaskId.set(record.taskId, record);
-			observeAgentName(record.name);
-		}
+		for (const record of initial ?? []) this.#index(record);
 	}
 
-	/** The same records, every run included, writing through `persist` instead; this registry is left as it was. */
-	redirect(persist: (record: AgentRecord) => void): AgentRegistry {
-		const copy = new AgentRegistry(persist);
-		for (const [name, record] of this.#byName) copy.#byName.set(name, record);
-		for (const [taskId, record] of this.#byTaskId) copy.#byTaskId.set(taskId, record);
-		return copy;
+	#index(record: AgentRecord): void {
+		observeAgentName(record.name);
+		this.#byName.set(record.name, record);
+		this.#byTaskId.set(record.taskId, record);
 	}
 
 	/** The newest record under a name, or undefined. */
@@ -278,9 +273,7 @@ export class AgentRegistry {
 
 	/** Write a record (new or changed) and persist it. Returns the stored record. */
 	put(record: AgentRecord): AgentRecord {
-		observeAgentName(record.name);
-		this.#byName.set(record.name, record);
-		this.#byTaskId.set(record.taskId, record);
+		this.#index(record);
 		this.#persist(record);
 		return record;
 	}
@@ -290,8 +283,8 @@ export class AgentRegistry {
 	 * name.
 	 *
 	 * `readBy` is not changeable here, by type: a result is consumed exactly
-	 * where it is handed back, and the only setter is {@link markRead}, called
-	 * by `AgentRuntime.takeUnread` (C7).
+	 * where it is handed back, through {@link consume} and {@link markHandedSeen},
+	 * called from `AgentRuntime`'s take paths (C7).
 	 */
 	update(name: string, change: Partial<Omit<AgentRecord, "readBy" | "readAt">>): AgentRecord | undefined {
 		const current = this.#byName.get(name);
@@ -300,24 +293,60 @@ export class AgentRegistry {
 	}
 
 	/**
-	 * Record that the run `taskId` under `name` reached a reader, and how (C7:
-	 * delivered once).
-	 *
-	 * Call this from `AgentRuntime.takeUnread` and nowhere else — it is the
-	 * step *after* the text has been handed to a reader, so a path that
-	 * consumes a result without printing it cannot be written. A stale task id
-	 * (the name has since been reused) is ignored: that run is nobody's to read.
-	 *
-	 * The only re-mark allowed is `handed` → `conversation`: a message given to
-	 * pi's queue whose arrival in the session file the harness has since seen.
-	 * Every other second call is a no-op, so a record cannot be talked out of
-	 * the strongest claim already made about it.
+	 * A result handed to pi's queue has since been seen in the session file:
+	 * `handed` becomes `conversation`. The only re-mark there is, so a record is
+	 * never talked out of the strongest claim made about it; anything else, or a
+	 * stale task id (the name has since been reused), is a no-op.
 	 */
-	markRead(name: string, taskId: string, by: AgentReadBy, at: number): void {
+	markHandedSeen(name: string, taskId: string, at: number): void {
 		const current = this.#byName.get(name);
-		if (current === undefined || current.taskId !== taskId) return;
-		if (current.readBy !== undefined && !(current.readBy === "handed" && by === "conversation")) return;
-		this.put({ ...current, readBy: by, readAt: at });
+		if (current?.taskId !== taskId || current.readBy !== "handed") return;
+		this.put({ ...current, readBy: "conversation", readAt: at });
+	}
+
+	/**
+	 * Mark `records` read by `by`, then run `hand`; true when it took them. A
+	 * `hand` that returns false or throws puts every record back as it was and
+	 * writes nothing.
+	 *
+	 * Invariant: a batch is never unread while it is being handed. The mark comes
+	 * first, in memory, so nothing `hand` sets off synchronously — a turn pi
+	 * starts inside `sendMessage`, whose `agent_start` offers unread results —
+	 * can take it again. A refusal restores only a record that still carries this
+	 * call's own mark: one `hand` re-marked by a later valid delivery stays so.
+	 *
+	 * Stated limit: the mark reaches the file after `hand` returns, so a crash
+	 * between the two delivers the result again on resume (at least once).
+	 */
+	consume(records: readonly AgentRecord[], by: AgentReadBy, at: number, hand: () => boolean | void): boolean {
+		const marks: { readonly prior: AgentRecord; readonly mark: AgentRecord }[] = [];
+		let taken = false;
+		try {
+			for (const record of records) {
+				const prior = this.#byName.get(record.name);
+				if (prior?.taskId !== record.taskId) continue;
+				if (prior.readBy !== undefined && !(prior.readBy === "handed" && by === "conversation")) continue;
+				const mark = { ...prior, readBy: by, readAt: at };
+				this.#index(mark);
+				marks.push({ prior, mark });
+			}
+			taken = hand() !== false;
+		} finally {
+			for (const { prior, mark } of marks) {
+				const current = this.#byName.get(mark.name);
+				if (current?.taskId !== mark.taskId) continue;
+				if (taken) {
+					if (current === mark) this.#persist(mark);
+					continue;
+				}
+				if (current.readBy !== mark.readBy || current.readAt !== mark.readAt) continue;
+				const restored = { ...current, readBy: prior.readBy, readAt: prior.readAt };
+				// Another write during `hand` persisted the mark; the file needs the restore too.
+				if (current === mark) this.#index(restored);
+				else this.put(restored);
+			}
+		}
+		return taken;
 	}
 
 	/**

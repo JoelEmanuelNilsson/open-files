@@ -11,9 +11,8 @@
  * options it was built from — so one lookup serves a grandchild too, and the
  * bytes are exactly the ones the parent's cache prefix was written with.
  *
- * The seam is `globalThis` (`side-flag.ts`'s pattern: child sessions run
- * in-process but get their own module registry, so a module-level variable
- * would not be shared).
+ * The seam is `globalThis` (`shared.ts`: child sessions run in-process but get
+ * their own module registry, so a module-level variable would not be shared).
  *
  * A child with a prompt body of its own (an agent type's markdown) is not an
  * inheriting child at all: its body arrives as `customPrompt` and takes pi's

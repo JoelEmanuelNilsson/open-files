@@ -4,10 +4,10 @@
  * session shuts down with reason `new` and the next session in the process
  * is its continuation.
  *
- * At `session_shutdown` for a replacement the engine parks its runtime here
- * under the file the replacement will use; at the replacement's
- * `session_start` the engine claims it by its own file and re-hosts it
- * (`AgentRuntime.rehost`). Only a replacement announced as a handoff
+ * At `session_shutdown` for a replacement the engine detaches its runtime and
+ * parks it here under the file the replacement will use; at the replacement's
+ * `session_start` the engine claims it by its own file and attaches it
+ * (`AgentRuntime.attach`). Only a replacement announced as a handoff
  * ({@link announceSessionHandoff}) parks: pi gives a handoff and a `/new`
  * typed by Joel the same shutdown event, and a `/new` must stop the runs
  * like quit, because nobody in that session would read their results.
@@ -63,7 +63,7 @@ const parked = (): Map<string, ParkedRuntime> => shared(SEAM, () => new Map<stri
 /** Leave a runtime for the session that will open `targetSessionFile`. Returns false when there is no file to key on. */
 export function parkAgentRuntime(targetSessionFile: string | undefined, runtime: AgentRuntime): boolean {
 	if (targetSessionFile === undefined) return false;
-	runtime.park();
+	runtime.detach();
 	const timer = setTimeout(() => {
 		if (parked().get(targetSessionFile)?.runtime === runtime) parked().delete(targetSessionFile);
 		void runtime.retire("orphaned");

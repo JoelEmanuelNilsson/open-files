@@ -32,15 +32,11 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { notice } from "../../lib/notice.ts";
-import { isSideSession } from "../../lib/side-flag.ts";
 import { applyChanges, describeChanges } from "./apply.ts";
 import { buildRows } from "./model.ts";
 import { showSkillsView } from "./view.ts";
 
 export default function skills(pi: ExtensionAPI) {
-	// A dialog is unreachable from btw's child session, which has no screen.
-	if (isSideSession()) return;
-
 	pi.registerCommand("skills", {
 		description: "Choose which skills the model may invoke",
 		handler: async (_args, ctx) => {

@@ -154,14 +154,19 @@ console.log(SCENARIOS[0]);
 	const DOC = `# Handoff\n## Intent\nProbe ${nonce}: prove the continuation reads the cached prefix.\n## State\nOne turn done.\n## Next\nReply with the single word CONTINUED.\n## Map\n- none\n## Decisions\n- none\n## Open\n- none`;
 	let error;
 	try {
-		await old.prompt(`Run ${nonce}. Reply with the single word OK and nothing else.`);
+		// Worded as "Run <nonce>" it read as a task, and the model sometimes handed it to an `Agent` child: a third turn.
+		await old.prompt(`Probe ${nonce} is a marker, not a task: use no tool. Reply with the single word OK and nothing else.`);
 		await old.prompt(`Now hand off. Reply with exactly the following text, verbatim, nothing before or after it:\n\n${DOC}`);
 	} catch (thrown) {
 		error = thrown instanceof Error ? thrown.message : String(thrown);
 	}
 	const oldTurns = assistants(old);
 	for (const m of oldTurns) spent += usageOf(m).cost?.total ?? 0;
-	check("two real turns reached the provider", error === undefined && oldTurns.length === 2 && (usageOf(oldTurns[0]).cacheRead ?? 0) + (usageOf(oldTurns[0]).cacheWrite ?? 0) > 0, error ?? `${oldTurns.length} turns, ${JSON.stringify(usageOf(oldTurns[0]))}`);
+	// Each turn as the model left it: its tool calls, or its first words.
+	const turnsSaid = oldTurns.map((m) => (m.content ?? []).map((b) => (b.type === "toolCall" ? `${b.name}(${JSON.stringify(b.arguments).slice(0, 80)})` : b.type === "text" ? JSON.stringify(b.text.slice(0, 40)) : b.type)).join(" ")).join(" | ");
+	// A tool call in turn 1 is the model delegating; a third turn without one is a result delivered into the seat.
+	check("turn 1 answered without a tool", (oldTurns[0]?.content ?? []).every((b) => b.type !== "toolCall"), turnsSaid);
+	check("two real turns reached the provider", error === undefined && oldTurns.length === 2 && (usageOf(oldTurns[0]).cacheRead ?? 0) + (usageOf(oldTurns[0]).cacheWrite ?? 0) > 0, error ?? `${oldTurns.length} turns: ${turnsSaid}; turn 1 usage ${JSON.stringify(usageOf(oldTurns[0]))}`);
 	const reply = textOf(oldTurns[1]).trim();
 	check("the model's reply is a handoff document (first line # Handoff)", reply.split("\n")[0]?.trim() === "# Handoff", reply.slice(0, 80));
 	const switched = await until(() => seat.runtime.session !== old && seat.runtime.session.isIdle && assistants(seat.runtime.session).length >= 1, 60_000);
