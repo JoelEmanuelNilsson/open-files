@@ -1,0 +1,72 @@
+# ---------------------------------------------------------------------------
+# THE light mode. Not a theme: the [light] table every setup in setups/ gets,
+# merged in by gen.load_setup_toml. A setup that wants to differ writes its own
+# [light] keys and they override these one by one.
+#
+# Paper and ink: pure white, near-black text, neutral greys with no hue, and
+# saturated accents. The greys follow ChatGPT's light UI, measured off a
+# screenshot: page #ffffff, sidebar #e5e5e5, rules #d5d5d5, text #0d0d0d.
+#
+# There is no [floors] block. This mode meets gen.py's defaults -- fg 7,
+# muted 5, dim 3, accent 4.5, accent_distance 0.08 -- on bg AND on slot 0.
+# Slot 0 is the stricter of the two: it is the panel, darker than the paper,
+# and where a TUI paints most of its text. That is why muted and dim are
+# darker than ChatGPT's #6e6e6e and #a1a1a1: those hold 3.8:1 and 2.6:1 on
+# its own sidebar grey, under the muted and dim floors.
+# ---------------------------------------------------------------------------
+
+# No wallpaper key: light mode takes the setup's top-level `wallpaper`, and a
+# setup without one leaves the desktop picture to whatever was set by hand.
+
+# Solid, no glass. These two override the setup's top-level opacity/blur,
+# which stays the default and keeps the dark half its glass. bin/theme writes
+# whichever mode is current and Ghostty picks it up on SIGUSR2 (1.3.1; see
+# write_glass). Paper behind glass is unreadable: 0.68 over a dark painting
+# took roughly a third off every contrast ratio the palette was solved for.
+opacity = 1.0
+blur = 0
+
+# No hue anywhere in the greys: chroma 0 on both families makes every surface
+# and every ink tier a pure grey, so `seed` / `text_seed` would be unused here.
+tint = 0
+text_tint = 0
+
+# The surface tiers, by OKLCH lightness.
+#   bg         1.0     #ffffff
+#   surface    0.9219  #e5e5e5  ChatGPT's sidebar
+#   selection  0.873   #d5d5d5  ChatGPT's rules
+bg = 1.0
+surface = 0.9219
+selection = 0.873
+
+# The ink tiers. fg is #1a1a1a rather than black so that `strong` has a
+# darker step left for bold.
+#          hex        on bg   on slot 0
+#   dim    #6e6e6e    5.10:1    4.05:1
+#   muted  #4d4d4d    8.45:1    6.71:1
+#   fg     #1a1a1a   17.40:1   13.82:1
+#   strong #000000   21.00:1   16.67:1
+dim = 0.538
+muted = 0.421
+fg = 0.2178
+strong = 0.0
+
+# A black block cursor, reversed out to white.
+cursor = 0.0
+cursor_tint = 0
+
+# The six accents, derived from gen.py's hue spread (no two hues closer than
+# 45 degrees) at one shared lightness and chroma.
+hue_pull = 0
+accent_chroma = 0.22  # saturated, not muted. Blue and magenta reach it; red
+                      # stops at 0.20 and green at 0.15 on the sRGB gamut
+                      # edge. Yellow (0.10) and cyan (0.08) cannot get more
+                      # saturated than that at this lightness at all.
+accent = 0.49         # the lightest value at which all six still clear 4.5:1
+                      # on slot 0. Green sets it (4.68:1 there).
+                      # red #b6001c  green #00751d  yellow #7a5b00
+                      # blue #204dda  magenta #9910a2  cyan #006e77
+                      # Yellow reads as amber: a yellow dark enough for 4.5:1
+                      # on white cannot be a bright yellow.
+bright_delta = -0.06  # toward the ink: a bright slot is emphasis, and on
+                      # paper emphasis is darker.

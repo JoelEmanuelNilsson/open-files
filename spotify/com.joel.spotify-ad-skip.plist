@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.joel.spotify-ad-skip</string>
+
+  <!-- `open`, which starts the APP, which starts the watcher.
+
+       Two separate reasons for this exact shape.
+
+       The app rather than the script: macOS grants Automation to the
+       responsible process. Point this at /bin/bash and the responsible process
+       is /bin/bash, recorded on this machine as DENIED for Spotify -- the
+       watcher then hangs for ever on its first question, with no dialog,
+       because launchd cannot show one. The app carries the grant.
+
+       `open` rather than the app's executable: when a launchd job exits,
+       launchd reaps whatever the job left running. Run the applet as the job
+       and the watcher it spawns is killed a second later -- measured. Going
+       through `open` hands the launch to LaunchServices, so the app and its
+       watcher are not the job's children and outlive it. The job here is
+       `open` itself, which exits immediately, having done its work. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/open</string>
+    <string>-a</string>
+    <string>/Users/joel/dotfiles/spotify/SpotifyAdSkip.app</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- No KeepAlive on purpose. The app is meant to exit within a second, so
+       KeepAlive would relaunch it for ever. The watcher it leaves behind takes
+       a lock, so running this again at any time is safe and is a no-op while
+       one is already alive. -->
+  <key>KeepAlive</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/joel/.cache/spotify-ad-skip.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/joel/.cache/spotify-ad-skip.err.log</string>
+</dict>
+</plist>

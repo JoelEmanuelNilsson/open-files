@@ -1,0 +1,9 @@
+[user]
+	name = Joel Nilsson
+	email = joel.emanuel.nilsson@gmail.com
+[credential "https://github.com"]
+	helper = 
+	helper = !/opt/homebrew/bin/gh auth git-credential
+[credential "https://gist.github.com"]
+	helper = 
+	helper = !/opt/homebrew/bin/gh auth git-credential

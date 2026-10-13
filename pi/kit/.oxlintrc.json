@@ -1,0 +1,21 @@
+{
+  "plugins": [],
+  "categories": {
+    "correctness": "off"
+  },
+  "ignorePatterns": [
+    "node_modules/**",
+    "test/node_modules/**",
+    "skills/install-anti-slop/assets/**"
+  ],
+  "jsPlugins": [
+    {
+      "name": "anti-slop",
+      "specifier": "./test/lint/anti-slop-plugin.ts"
+    }
+  ],
+  "rules": {
+    "anti-slop/no-widen-then-assert": "error",
+    "anti-slop/require-safety-comment-for-type-assertion": "error"
+  }
+}

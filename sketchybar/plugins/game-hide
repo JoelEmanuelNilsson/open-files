@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Hides the bar while a game is frontmost, shows it again when it isn't.
+#
+# Why: the bar is topmost and shown in fullscreen, so it sits over a fullscreen
+# game. Any window above a fullscreen surface makes WindowServer composite every
+# frame instead of giving the game the display directly -- a real frame-time
+# cost for OpenGL-under-Rosetta ports like Civ V. Hidden, the bar is not a
+# window and the game gets the direct path.
+#
+# Driven by sketchybar's own front_app_switched event; $INFO is the app name.
+# Runs once per app switch, nothing at rest.
+SB=/opt/homebrew/bin/sketchybar
+
+# One name per line. Match is a case-insensitive substring of the app name as
+# macOS reports it (see `sketchybar --query front_app` or the item's $INFO).
+GAMES="$CONFIG_DIR/games.txt"
+
+[ "$SENDER" = "front_app_switched" ] || exit 0
+
+# /bin/bash is 3.2, so no ${var,,}; lower-case both sides with tr.
+front=$(printf '%s' "$INFO" | /usr/bin/tr '[:upper:]' '[:lower:]')
+hidden=off
+if [ -f "$GAMES" ]; then
+  while IFS= read -r name; do
+    [ -z "$name" ] && continue
+    case "${name:0:1}" in '#') continue ;; esac
+    name=$(printf '%s' "$name" | /usr/bin/tr '[:upper:]' '[:lower:]')
+    if [[ "$front" == *"$name"* ]]; then hidden=on; break; fi
+  done < "$GAMES"
+fi
+
+"$SB" --bar hidden="$hidden"

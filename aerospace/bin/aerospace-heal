@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+#
+# Put every pinned app back in its room.
+#
+# A birth rule in aerospace.toml runs once, when a window is first seen. After
+# that nothing holds the invariant: ⌘W and reopen, a mis-aimed key, a window
+# AeroSpace only noticed after it was already somewhere — any of these leaves
+# Ghostty in the drawer, and it stays there. This is the other half of the
+# rule: run it and the rooms are right again.
+#
+# Wired to the room keys (after the switch, so the switch stays instant) and to
+# startup, where windows that predate AeroSpace never fired a rule at all.
+# Costs one list-windows and, only when something has strayed, one request.
+#
+# Floating windows are left alone. What floats is decided by the float list in
+# aerospace.toml and by AeroSpace's dialog heuristic, and there is no key that
+# floats a window by mistake any more.
+
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/aerospace-lib"
+
+# Two inputs to one awk: the homes first (FNR==NR), then the windows.
+strays=$(awk '
+	FNR == NR { home[$1] = $2; next }
+	($1 in home) && $3 != home[$1] { move = move (move ? "; " : "") "move-node-to-workspace --window-id " $2 " " home[$1] }
+	END { if (move) print move }
+' <(pinned_homes) <(aerospace list-windows --all --format '%{app-bundle-id} %{window-id} %{workspace}'))
+
+[[ -n "$strays" ]] && aerospace eval "$strays"
+exit 0

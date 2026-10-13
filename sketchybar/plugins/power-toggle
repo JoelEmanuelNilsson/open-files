@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Click the battery: flip Low Power Mode.
+#
+# ── Why this needs a sudoers rule ───────────────────────────────────────────
+#
+# `pmset` refuses to change anything as a normal user, and there is no public
+# API for setting it either -- IOPMSetPMPreferences exists but is root-only for
+# the same reason. So the choices are: an admin password prompt on every click,
+# which makes the item useless; a privileged helper tool, which is a launchd
+# job and a code-signing story for one boolean; or one narrow sudoers rule.
+#
+# The rule names the four exact command lines this script can run and nothing
+# else -- no wildcard on the value, no wildcard on the flag. install.sh writes
+# it. Joel already had the same shape of rule for `pmset -a disablesleep`, so
+# this is the established pattern on this machine rather than a new one.
+#
+# ── Why -b and -c rather than -a ────────────────────────────────────────────
+#
+# macOS keeps a separate power mode for battery and for mains, and ships them
+# different by default: low on battery, high on the charger. That is a sensible
+# default and `-a` would flatten it, so this flips only the source you are
+# actually running on. Which source that is comes from sysprobe, which reads
+# it from the power-source state rather than from `charging` -- plugged in and
+# already full is still mains.
+
+set -u
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+# A fresh probe process, so none of the resident one's caching applies.
+line="$("$DIR/bin/sysprobe" metrics 2>/dev/null)"
+[ -z "$line" ] && exit 0
+
+power=0; on_ac=0
+for kv in $line; do
+  case "$kv" in
+    power=*)    power="${kv#*=}" ;;
+  esac
+done
+
+# sysprobe does not emit the source directly, but it does not have to: the
+# `power` value it reports is already the one for the live source, and the
+# flag below only has to pick the same source to write back to.
+case "$(pmset -g ps 2>/dev/null | head -1)" in
+  *"AC Power"*) flag=-c; on_ac=1 ;;
+  *)            flag=-b ;;
+esac
+
+# 0 is "automatic", which macOS uses as a starting value and which no click
+# should ever leave you in -- a toggle with three positions is not a toggle.
+# Anything that is not already low becomes low; low becomes high.
+if [ "$power" = "1" ]; then want=2; else want=1; fi
+
+if ! sudo -n /usr/bin/pmset "$flag" powermode "$want" 2>/dev/null; then
+  # No rule installed, or it was revoked. Rather than fail silently, hand the
+  # user the pane that can do it and leave the bar alone.
+  open "x-apple.systempreferences:com.apple.Battery-Settings.extension" 2>/dev/null
+  exit 0
+fi
+
+# Tell the resident probe the preference changed, so the next 1 Hz frame
+# paints from fresh state instead of a cache that is now up to 5 s stale.
+# Matched by path suffix, not by $DIR: the resident one is started through
+# the ~/.config/sketchybar symlink and $DIR may name the real repo path.
+pkill -USR1 -f "bin/sysprobe stream" 2>/dev/null || true

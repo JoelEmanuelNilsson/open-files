@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Left click play/pause, right click next. media-control drives the same
+# MediaRemote session the bar is reading, so this works for Chrome as well as
+# for Spotify without knowing which is playing.
+case "${BUTTON:-left}" in
+  right) /opt/homebrew/bin/media-control next 2>/dev/null ;;
+  *)     /opt/homebrew/bin/media-control toggle-play-pause 2>/dev/null ;;
+esac

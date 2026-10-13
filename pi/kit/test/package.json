@@ -1,0 +1,11 @@
+{
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "@oxlint/plugins": "1.78.0",
+    "@types/node": "26.6.2",
+    "@xterm/headless": "6.0.0",
+    "oxlint": "1.78.0",
+    "typescript": "5.9.3"
+  }
+}

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.joel.video-wallpaper</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/joel/dotfiles/video-wallpaper/video-wallpaper</string>
+		<string>--follow</string>
+		<string>/Users/joel/dotfiles/theme/gen/wallpaper/video</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<!-- Restarted if it dies. It holds no state: on start it reads the followed
+	     file and shows whatever that says. -->
+	<key>KeepAlive</key>
+	<true/>
+	<!-- Interactive, so launchd does not throttle it like a background job and
+	     the video does not stutter. -->
+	<key>ProcessType</key>
+	<string>Interactive</string>
+	<key>LimitLoadToSessionType</key>
+	<string>Aqua</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/joel/.cache/video-wallpaper.log</string>
+</dict>
+</plist>

@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+#
+# The focused window over the whole screen, and back. Bound to º enter.
+#
+# AeroSpace's own `fullscreen` toggles only for tiled windows. On a floating
+# window (the float list: Spotify, Wispr Flow) it fills the screen once and
+# then drops the flag (layoutRecursive.swift, layoutFloatingWindow), so the
+# next press fills it again instead of undoing it — the window can never get
+# its own size back. So for a floating window this script remembers the frame
+# before filling, and the second press puts that frame back.
+#
+# The frame is read and written through System Events, because AeroSpace has
+# no command that moves or sizes a floating window.
+
+set -euo pipefail
+
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/aerospace"
+mkdir -p "$STATE"
+
+read -r id pid layout < <(aerospace list-windows --focused --format '%{window-id} %{app-pid} %{window-layout}')
+[[ -n "${id:-}" ]] || exit 0
+
+if [[ "$layout" != floating ]]; then
+	aerospace fullscreen
+	exit 0
+fi
+
+saved="$STATE/fullscreen-$id"
+frame() {
+	osascript -e "tell application \"System Events\" to tell (first process whose unix id is $pid) to $1"
+}
+
+if [[ -f "$saved" ]]; then
+	read -r x y w h <"$saved"
+	rm -f "$saved"
+	# Two statements: System Events refuses size and position set as one list.
+	frame "set size of window 1 to {$w, $h}" >/dev/null
+	frame "set position of window 1 to {$x, $y}" >/dev/null
+else
+	frame 'get {position, size} of window 1' | tr -d ',' >"$saved"
+	aerospace fullscreen on
+fi

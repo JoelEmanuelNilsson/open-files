@@ -1,0 +1,2 @@
+# Apps that hide the bar while frontmost. Substring, case-insensitive.
+Civilization V

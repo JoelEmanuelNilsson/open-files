@@ -1,0 +1,68 @@
+# A theme is this file and nothing else: a colour and a few numbers.
+# dots -- cyberpurple's surfaces, greys and glass unchanged, with the accents
+# taken from the "dots" wordmark: purple -> blue-green -> yellow -> pink -> purple.
+# Solid, clean colours -- not neon. Purple, pink, blue, green and yellow only:
+# no cyan, no orange, no blue-green; slot 6 is a light lavender.
+# cyberdream.toml with three numbers changed, and nothing else. Its accents,
+# its skin and its wallpaper are all still his; only the greys moved:
+#
+#   background 0a0212   slot 0  1e1227   slot 8  9d8eab
+#   foreground ffffff   slot 7  ffffff   slot 15 ffffff
+#
+# The three are seed, tint and bg, and the third is why the other two do
+# anything: chroma at L 0 is still black, so a pure-black background cannot
+# be purple. Raising bg is what gives the hue somewhere to sit.
+#
+# It cannot rise much further. His accents are solved against pure black and
+# gen.py holds them to 4.5:1 -- at bg 0.24 his red #d9534f falls to 4.16 and
+# build_palette refuses outright. About 0.18 is the ceiling. Past that the
+# accents have to be re-solved (theme/solve_accents.py) and stop being his.
+
+seed = "#bd5eff"      # his magenta. Unlike cyberdream this seed is used: tint
+                      # is non-zero, so every surface and every grey carries it.
+tint = 0.045          # OKLCH chroma of the surface tiers; purple, not grey
+text_tint = 0.022     # OKLCH chroma of the text tiers; a violet cast on white
+accent_chroma = 0.11  # unused: all twelve accent slots are explicit below
+hue_pull = 0          # ditto
+skin = "islands"      # sketchybar/skins/<name>.sh: one glass chip per group.
+                      # Changing it reloads the bar.
+opacity = 0.88        # his is 0.6. Over the lake video 0.78 and 0.82 read
+                      # too thin; 0.88 keeps the video a tint behind the text.
+                      # The DEFAULT for both modes, not a theme-wide constant:
+                      # light.toml overrides it with 1.0, because paper behind
+                      # glass is unreadable. This is the number dark mode gets.
+blur = 24
+
+[dark]
+# No wallpaper key: the desktop picture is set by hand, not by the theme.
+bg = 0.12             # #0a0212. See the header: this is the whole theme.
+surface = 0.208       # #1e1227 -- his lightness, tinted
+selection = 0.371     # #473a52 -- his lightness, tinted
+dim = 0.669           # #8d96a0
+muted = 1.0           # #ffffff -- slot 7 is white in his palette, the same
+                      # colour as the foreground. The bar does not read it:
+                      # the islands skin fills its chips with bg at the glass opacity.
+fg = 0.90            # not 1.0. Pure white on #0a0212 halates: the glyph bleeds
+                      # into the near-black and the letter shape smears, which
+                      # costs more than the contrast gains. 0.90 is ~#ded4e8,
+                      # still about 13:1. `strong` stays at 1.0 so bold has
+                      # somewhere to go.
+strong = 1.0
+cursor = 1.0
+accent = 0.8          # unused: every accent slot is explicit
+bright_delta = 0.0    # his slots 9-14 are identical to 1-6
+
+# The dots gradient as [OKLCH L, C, h]. Only these six differ from cyberpurple.
+# Blue and purple are pure, saturated colours rather than pastels, and a pure
+# blue cannot reach 4.5:1 on a near-black background. The accent floor is
+# declared down to what they actually ship.
+[dark.floors]
+accent = 3.5
+
+[dark.accents]
+1 = [0.74, 0.16, 355.0]   # red      -> rose pink
+2 = [0.70, 0.22, 142.0]   # green    -> saturated green, not pastel
+3 = [0.88, 0.15, 100.0]   # yellow   -> yellow, not amber
+4 = [0.56, 0.25, 264.0]   # blue     -> pure blue, not blue-white
+5 = [0.58, 0.27, 302.0]   # magenta  -> real purple, not lilac
+6 = [0.84, 0.10, 300.0]   # cyan     -> light lavender (no cyan, no orange)

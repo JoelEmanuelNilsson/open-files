@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Linked into the binary's __TEXT,__info_plist section (see build_video_wallpaper
+     in install.sh), so a bare executable still has a bundle identifier and runs
+     as a UI element: no Dock icon, no menu bar. -->
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>com.joel.video-wallpaper</string>
+	<key>CFBundleName</key>
+	<string>video-wallpaper</string>
+	<key>LSUIElement</key>
+	<true/>
+</dict>
+</plist>

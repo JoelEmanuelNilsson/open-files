@@ -1,0 +1,36 @@
+{
+  "name": "pi-kit",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Joel's pi configuration: extensions, skills, and themes, all of it",
+  "keywords": [
+    "pi-package"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ],
+    "skills": [
+      "./skills"
+    ],
+    "themes": [
+      "./themes"
+    ],
+    "prompts": [
+      "./prompts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "scripts": {
+    "test": "node test/suite-runner.mjs",
+    "lint": "NODE_OPTIONS=\"--import ./test/support/resolve-oxlint-plugins.mjs\" test/node_modules/.bin/oxlint -c .oxlintrc.json .",
+    "typecheck": "test/node_modules/.bin/tsc -p tsconfig.json"
+  }
+}

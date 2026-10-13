@@ -1,0 +1,360 @@
+#!/usr/bin/env bash
+#
+# Turn sysprobe's output into bar updates.
+#
+# This is the loop the whole design rests on. sysprobe stays resident and
+# prints one line a second; this reads it and makes exactly one batched
+# sketchybar call per line. So the steady-state cost of every polled item on
+# the bar -- cpu, memory, battery, keyboard, network, clock -- is one fork per
+# second between them, instead of one fork per item per second.
+#
+# WRITTEN FOR BASH 3.2, deliberately. macOS ships nothing newer and this is
+# started by launchd, where $PATH is not yours. That rules out associative
+# arrays and `printf %()T`, so the parse below is a case statement and the
+# clock arrives pre-formatted from sysprobe.
+#
+# Nothing in this file forks. Every construct is a shell builtin, and the one
+# external command is the sketchybar call at the end of each tick.
+#
+# The protocol, emitted by bin/sysprobe.m:
+#   m <k=v ...>   metrics, once a second. audio_name is last: it is the only
+#                 field that can contain spaces.
+#   a <k=v ...>   volume, mute or output device changed. Pushed immediately.
+#   k kbd=<f>     keyboard backlight changed. Pushed immediately.
+
+set -u
+
+CONFIG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Before the glyphs, because a glyph's size comes from the skin's chip height.
+source "$CONFIG_DIR/lib/skin.sh"
+source "$CONFIG_DIR/lib/icons.sh"
+
+SKETCHYBAR=/opt/homebrew/bin/sketchybar
+
+# ── State carried between ticks ─────────────────────────────────────────────
+# One job: suppressing no-op writes, so the bar is only told about the things
+# that actually changed. A glyph is a string comparison here and a re-render
+# there, and at one tick a second the difference compounds.
+last_batt_icon=""; last_vol_icon=""; last_audio_icon=""
+last_wifi_icon=""; last_kbd_state=""; last_clock=""
+last_vol_raw=""; last_mute=""
+last_boost=""         # hidden | ready — the charge-boost button
+BOOST_STATE=/tmp/sketchybar-chargeboost
+hold=""               # the charge limit for this stretch on the cable; "" = decide
+was_ac=""             # the cable, last tick
+LIMIT_FAILED=/tmp/sketchybar-chargelimit-failed   # plugins/charge-boost: last write refused
+limit_at=0            # $SECONDS at the last limit write
+
+# ── Picking a glyph ─────────────────────────────────────────────────────────
+#
+# These three items change their glyph while the bar is running -- twelve
+# battery levels, five volume levels, seven kinds of output device -- and every
+# one of those glyphs has different ink, so each needs its own point size. A
+# single icon.font set once on the item is right for whichever glyph happened
+# to be showing when it was chosen and wrong for all the rest: the built-in
+# speaker was drawn at the size measured from the AirPods glyph and overflowed
+# its chip by 28%.
+#
+# So the size is chosen in the same breath as the glyph, and all three come out
+# in g_icon, g_pt and g_pad. Setting one without the others is not possible
+# here, which is the point.
+#
+# g_pad is the left padding that centres that glyph's ink in its cell, and it
+# belongs here for the same reason the size does: it is computed from the size,
+# so a glyph swapped without it lands off-centre by up to two points. See
+# lib/icons.sh.
+#
+# They assign to globals rather than echoing, because `x=$(f)` in bash is a
+# fork. Three of those a second is more than the rest of this loop costs.
+g_icon=""; g_pt=""; g_pad=""
+
+pick_battery() {                       # $1 = percent, $2 = charging
+  if   [ "$2" = "1" ];   then g_icon=$ICON_BATT_CHARGE; g_pt=$PT_BATT_CHARGE; g_pad=$PAD_BATT_CHARGE
+  elif [ "$1" -le 5  ];  then g_icon=$ICON_BATT_ALERT;  g_pt=$PT_BATT_ALERT; g_pad=$PAD_BATT_ALERT
+  elif [ "$1" -le 15 ];  then g_icon=$ICON_BATT_10;     g_pt=$PT_BATT_10; g_pad=$PAD_BATT_10
+  elif [ "$1" -le 25 ];  then g_icon=$ICON_BATT_20;     g_pt=$PT_BATT_20; g_pad=$PAD_BATT_20
+  elif [ "$1" -le 35 ];  then g_icon=$ICON_BATT_30;     g_pt=$PT_BATT_30; g_pad=$PAD_BATT_30
+  elif [ "$1" -le 45 ];  then g_icon=$ICON_BATT_40;     g_pt=$PT_BATT_40; g_pad=$PAD_BATT_40
+  elif [ "$1" -le 55 ];  then g_icon=$ICON_BATT_50;     g_pt=$PT_BATT_50; g_pad=$PAD_BATT_50
+  elif [ "$1" -le 65 ];  then g_icon=$ICON_BATT_60;     g_pt=$PT_BATT_60; g_pad=$PAD_BATT_60
+  elif [ "$1" -le 75 ];  then g_icon=$ICON_BATT_70;     g_pt=$PT_BATT_70; g_pad=$PAD_BATT_70
+  elif [ "$1" -le 85 ];  then g_icon=$ICON_BATT_80;     g_pt=$PT_BATT_80; g_pad=$PAD_BATT_80
+  elif [ "$1" -le 95 ];  then g_icon=$ICON_BATT_90;     g_pt=$PT_BATT_90; g_pad=$PAD_BATT_90
+  else                        g_icon=$ICON_BATT_100;    g_pt=$PT_BATT_100; g_pad=$PAD_BATT_100
+  fi
+}
+
+pick_volume() {                        # $1 = percent, $2 = muted
+  if   [ "$2" = "1" ];  then g_icon=$ICON_VOL_MUTE; g_pt=$PT_VOL_MUTE; g_pad=$PAD_VOL_MUTE
+  elif [ "$1" -le 0  ]; then g_icon=$ICON_VOL_ZERO; g_pt=$PT_VOL_ZERO; g_pad=$PAD_VOL_ZERO
+  elif [ "$1" -lt 34 ]; then g_icon=$ICON_VOL_LOW;  g_pt=$PT_VOL_LOW; g_pad=$PAD_VOL_LOW
+  elif [ "$1" -lt 67 ]; then g_icon=$ICON_VOL_MED;  g_pt=$PT_VOL_MED; g_pad=$PAD_VOL_MED
+  else                       g_icon=$ICON_VOL_HIGH; g_pt=$PT_VOL_HIGH; g_pad=$PAD_VOL_HIGH
+  fi
+}
+
+# One glyph per kind of thing the sound can come out of. `wired` covers both
+# USB-C EarPods and anything in the 3.5mm jack, because from here they are the
+# same object -- headphones on a cable -- even though CoreAudio files them
+# under two different transports.
+pick_audio() {                         # $1 = kind, as classified by sysprobe
+  case "$1" in
+    builtin)   g_icon=$ICON_DEV_BUILTIN; g_pt=$PT_DEV_BUILTIN; g_pad=$PAD_DEV_BUILTIN ;;
+    wired)     g_icon=$ICON_DEV_WIRED;   g_pt=$PT_DEV_WIRED; g_pad=$PAD_DEV_WIRED ;;
+    bluetooth) g_icon=$ICON_DEV_BT;      g_pt=$PT_DEV_BT; g_pad=$PAD_DEV_BT ;;
+    usb)       g_icon=$ICON_DEV_USB;     g_pt=$PT_DEV_USB; g_pad=$PAD_DEV_USB ;;
+    display)   g_icon=$ICON_DEV_DISPLAY; g_pt=$PT_DEV_DISPLAY; g_pad=$PAD_DEV_DISPLAY ;;
+    airplay)   g_icon=$ICON_DEV_AIRPLAY; g_pt=$PT_DEV_AIRPLAY; g_pad=$PAD_DEV_AIRPLAY ;;
+    *)         g_icon=$ICON_DEV_OTHER;   g_pt=$PT_DEV_OTHER; g_pad=$PAD_DEV_OTHER ;;
+  esac
+}
+
+# Integers only: bash has no floating point, and every threshold here is a
+# whole number of percent anyway. sysprobe emits one decimal place, so this
+# drops it rather than paying for `bc`.
+whole() { printf '%s' "${1%%.*}"; }
+
+# The keyboard backlight arrives as 0.000 - 1.000. Three states, matching the
+# three positions plugins/kbd-click steps through.
+#
+# Leading zeros are stripped before the arithmetic: bash reads `08` inside
+# $(( )) as octal and fails the whole expression, which is a genuinely
+# baffling way for a status bar to break at exactly 8% brightness.
+kbd_state() {
+  local i f n
+  i="${1%%.*}"; f="${1#*.}00"; f="${f:0:2}"; f="${f#0}"; f="${f#0}"
+  [ -z "$f" ] && f=0
+  n=$(( i * 100 + f ))
+  if   [ "$n" -le 2  ]; then printf 'off'
+  elif [ "$n" -le 60 ]; then printf 'low'
+  else                       printf 'high'
+  fi
+}
+
+# Emit the keyboard item only when its state actually changes.
+set_kbd() {
+  local st="$1"
+  [ "$st" = "$last_kbd_state" ] && return
+  last_kbd_state="$st"
+  case "$st" in
+    off)  args+=(--set kbd "icon=$ICON_KBD_OFF" "icon.font=$GLYPH_FONT$PT_KBD_OFF" "icon.padding_left=$PAD_KBD_OFF") ;;
+    *)    args+=(--set kbd "icon=$ICON_KBD"     "icon.font=$GLYPH_FONT$PT_KBD"     "icon.padding_left=$PAD_KBD") ;;
+  esac
+}
+
+# ── Parsing ─────────────────────────────────────────────────────────────────
+# audio_name is the only field that may contain spaces, so it is always last
+# and is split off before the rest is tokenised.
+f_cpu=0; f_mem=0; f_batt=-1; f_charging=0; f_ac=0; f_batt_present=0; f_kbd=0
+f_power=0; f_vol=0; f_mute=0; f_net_up=0; f_net_wifi=0; f_net_if="-"; f_clock=""
+f_audio_kind="other"; f_audio_name=""
+
+parse() {
+  local rest="$1" kv head
+  case "$rest" in
+    *audio_name=*) f_audio_name="${rest#*audio_name=}"; head="${rest%%audio_name=*}" ;;
+    *)             head="$rest" ;;
+  esac
+  for kv in $head; do
+    case "$kv" in
+      cpu=*)          f_cpu="${kv#*=}" ;;
+      mem=*)          f_mem="${kv#*=}" ;;
+      batt=*)         f_batt="${kv#*=}" ;;
+      charging=*)     f_charging="${kv#*=}" ;;
+      ac=*)           f_ac="${kv#*=}" ;;
+      batt_present=*) f_batt_present="${kv#*=}" ;;
+      power=*)        f_power="${kv#*=}" ;;
+      kbd=*)          f_kbd="${kv#*=}" ;;
+      vol=*)          f_vol="${kv#*=}" ;;
+      mute=*)         f_mute="${kv#*=}" ;;
+      net_up=*)       f_net_up="${kv#*=}" ;;
+      net_wifi=*)     f_net_wifi="${kv#*=}" ;;
+      net_if=*)       f_net_if="${kv#*=}" ;;
+      clock=*)        f_clock="${kv#*=}" ;;
+      audio_kind=*)   f_audio_kind="${kv#*=}" ;;
+    esac
+  done
+}
+
+# ── The tick ────────────────────────────────────────────────────────────────
+
+args=()
+
+push_audio() {
+  local vol
+  vol=$(whole "$f_vol"); [ "$vol" -lt 0 ] 2>/dev/null && vol=0
+  pick_volume "$vol" "$f_mute"
+  if [ "$g_icon" != "$last_vol_icon" ]; then
+    args+=(--set volume "icon=$g_icon" "icon.font=$GLYPH_FONT$g_pt" "icon.padding_left=$g_pad")
+    last_vol_icon="$g_icon"
+  fi
+  args+=(--set volume "label=${vol}%")   # always on: see items/right.sh
+
+  pick_audio "$f_audio_kind"
+  if [ "$g_icon" != "$last_audio_icon" ]; then
+    args+=(--set audio "icon=$g_icon" "icon.font=$GLYPH_FONT$g_pt" "icon.padding_left=$g_pad")
+    last_audio_icon="$g_icon"
+  fi
+}
+
+# The limit powerd has registered now, so a pump restart re-applies nothing
+# it does not have to -- every change SIGKILLs PowerUIAgent. One fork, at
+# startup, before the loop's no-fork rule applies.
+charge_limit="$("$CONFIG_DIR/plugins/charge-boost" current 2>/dev/null)"
+# A refusal left by an earlier pump says nothing about this one's writes.
+rm -f "$LIMIT_FAILED"
+
+while IFS= read -r line; do
+  kind="${line%% *}"
+  rest="${line#* }"
+  parse "$rest"
+  args=()
+
+  case "$kind" in
+    a)
+      push_audio
+      ;;
+
+    k)
+      set_kbd "$(kbd_state "$f_kbd")"
+      ;;
+
+    m)
+      # ── graphs ──
+      # --push takes 0..1. Dividing by 100 in the shell would need bc, so the
+      # value is assembled as a decimal string instead: 0.<two digits>.
+      c=$(whole "$f_cpu"); [ "$c" -gt 100 ] 2>/dev/null && c=100
+      m=$(whole "$f_mem"); [ "$m" -gt 100 ] 2>/dev/null && m=100
+      # 100 is the one value that is not two digits: "0.100" is a tenth.
+      if [ "$c" -ge 100 ]; then pc=1; else printf -v pc '0.%02d' "$c"; fi
+      if [ "$m" -ge 100 ]; then pm=1; else printf -v pm '0.%02d' "$m"; fi
+      args+=(--push cpu "$pc" --push mem "$pm")
+
+      # The label is always on -- a ticking number is what tells you the
+      # meter is live, see items/left.sh. Its width is fixed there, not
+      # here: sketchybar drops a leading space.
+      args+=(--set cpu "label=${c}%" --set mem "label=${m}%")
+
+      # ── battery ──
+      if [ "$f_batt_present" = "1" ] && [ "$f_batt" -ge 0 ] 2>/dev/null; then
+        pick_battery "$f_batt" "$f_charging"
+        if [ "$g_icon" != "$last_batt_icon" ]; then
+          args+=(--set battery "icon=$g_icon" "icon.font=$GLYPH_FONT$g_pt" "icon.padding_left=$g_pad")
+          last_batt_icon="$g_icon"
+        fi
+        args+=(--set battery "label=${f_batt}%")
+      else
+        args+=(--set battery drawing=off)
+      fi
+
+      # ── charge limit ──
+      # The cable in means no drain. The native limit drains: plugged in
+      # above it, macOS runs the machine off the battery until it is back
+      # down to it (chargeSocLimitDrain, see plugins/charge-boost). So while
+      # the cable is in, the limit is held at or above the charge -- the
+      # next step of the five the slider offers, never below 80 -- and the
+      # battery neither drains nor charges more than the step's rounding.
+      #
+      # Decided once per stretch on the cable -- at plug-in, at pump start,
+      # when a boost ends -- and then held, never recomputed from the live
+      # charge. Recomputing is a ratchet: powerd lets the charge settle a
+      # point over its limit, and 86 against a limit of 85 would ask for 90,
+      # then 95, then 100. The same point of slack is why the charge is
+      # read one low: a restart at 86 keeps 85 rather than climbing to 90.
+      #
+      # A boost is 100 until it ends, at 100% or when the cable comes out.
+      # Ending it at 100% changes nothing on the cable -- the hold is then
+      # decided at 100 and stays there -- so charge you asked for is not
+      # drained back off while you are still plugged in.
+      #
+      # A write sudo refused -- almost always the sudoers rule not yet
+      # installed -- leaves $LIMIT_FAILED behind, and the write is tried
+      # again a minute after the last one. Without the retry, installing
+      # the rule would change nothing until the next plug-in.
+      #
+      # Forks only on a change or a refusal: rm once per boost, charge-boost
+      # once per limit change and once a minute while sudo says no.
+      # Everything else is arithmetic and a stat.
+      if [ -f "$BOOST_STATE" ] && { [ "$f_ac" != "1" ] || [ "$f_batt" -ge 100 ] 2>/dev/null; }; then
+        rm -f "$BOOST_STATE"
+        hold=""
+      fi
+      [ "$f_ac" = "1" ] && [ "$was_ac" != "1" ] && hold=""
+      was_ac="$f_ac"
+      if [ "$f_ac" = "1" ] && [ "$f_batt" -ge 0 ] 2>/dev/null; then
+        if [ -z "$hold" ]; then
+          hold=$(( f_batt - 1 ))
+          [ "$hold" -lt 80 ] && hold=80
+          hold=$(( (hold + 4) / 5 * 5 ))
+          [ "$hold" -gt 100 ] && hold=100
+        fi
+        if [ -f "$BOOST_STATE" ]; then want=100; else want="$hold"; fi
+        if [ -f "$LIMIT_FAILED" ] && [ $(( SECONDS - limit_at )) -ge 60 ]; then
+          charge_limit=""
+        fi
+        if [ "$want" != "$charge_limit" ]; then
+          charge_limit="$want"
+          limit_at=$SECONDS
+          "$CONFIG_DIR/plugins/charge-boost" limit "$want" >/dev/null 2>&1 &
+        fi
+      fi
+
+      # ── charge boost ──
+      # The chevrons show whenever a boost could do something: the cable in,
+      # below 100, no boost running, and the hold not already at 100.
+      if [ "$f_ac" = "1" ] && [ ! -f "$BOOST_STATE" ] && [ "$f_batt" -ge 0 ] 2>/dev/null \
+         && [ "$f_batt" -lt 100 ] && [ "${hold:-0}" -lt 100 ]; then
+        bst=ready
+      else
+        bst=hidden
+      fi
+      if [ "$bst" != "$last_boost" ]; then
+        last_boost="$bst"
+        case "$bst" in
+          hidden)  args+=(--set boost drawing=off --set sp.boost drawing=off) ;;
+          ready)   args+=(--set boost drawing=on --set sp.boost drawing=on) ;;
+        esac
+      fi
+
+      # ── network ──
+      if [ "$f_net_up" = "1" ]; then
+        if [ "$f_net_wifi" = "1" ]; then wi="$ICON_WIFI"; wp="$PT_WIFI"; wd="$PAD_WIFI"
+        else                             wi="$ICON_ETHERNET"; wp="$PT_ETHERNET"; wd="$PAD_ETHERNET"; fi
+      else
+        wi="$ICON_WIFI_OFF"; wp="$PT_WIFI_OFF"; wd="$PAD_WIFI_OFF"
+      fi
+      if [ "$wi" != "$last_wifi_icon" ]; then
+        args+=(--set wifi "icon=$wi" "icon.font=$GLYPH_FONT$wp" "icon.padding_left=$wd")
+        last_wifi_icon="$wi"
+      fi
+
+      # ── keyboard backlight ──
+      set_kbd "$(kbd_state "$f_kbd")"
+
+      # ── clock ──
+      if [ "$f_clock" != "$last_clock" ]; then
+        # sysprobe sends "22_Sep_Tue_19:25": its line is space-separated, so
+        # the spaces travel as underscores and come back here, without a fork.
+        args+=(--set clock "label=${f_clock//_/ }"); last_clock="$f_clock"
+      fi
+
+      # ── volume ──
+      # CoreAudio pushes an `a` line the instant anything changes, so this is
+      # only here to catch the cases the callback cannot: the very first tick,
+      # where the item is still showing its placeholder, and any change that
+      # happened while the bar was reloading.
+      #
+      # Guarded on the raw value rather than called unconditionally because
+      # push_audio uses command substitution, and in bash that is a fork. At
+      # one tick a second the guard is the difference between two extra forks
+      # a second forever and two extra forks a day.
+      if [ "$f_vol" != "$last_vol_raw" ] || [ "$f_mute" != "$last_mute" ]; then
+        push_audio
+        last_vol_raw="$f_vol"; last_mute="$f_mute"
+      fi
+
+      ;;
+  esac
+
+  [ ${#args[@]} -gt 0 ] && "$SKETCHYBAR" "${args[@]}" >/dev/null 2>&1
+done

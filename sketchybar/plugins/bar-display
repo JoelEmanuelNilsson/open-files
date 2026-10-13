@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Puts the bar on the built-in display, and only there.
+#
+# The bar is built for the notch. On the MacBook screen macOS withholds the top
+# 32pt from every app, and the bar fills exactly that strip, so no window loses
+# anything to it. An external monitor has no notch and reserves nothing: the
+# menu bar auto-hides, windows run to the top edge, and a bar drawn there sits
+# over the top 32pt of whatever app is under it. So on an external display the
+# bar is not drawn at all.
+#
+# sketchybar's default is every display, and its display numbers are an
+# arrangement order that changes with what is plugged in and which display is
+# main, so the built-in display cannot be named once in sketchybarrc. This runs
+# at startup and on every display_change (plug, unplug, rearrange, lid) and
+# names it again. sysprobe finds it by asking CoreGraphics which display is
+# built in; `--query displays` maps that id to the arrangement number.
+#
+# Lid closed there is no built-in display, and the bar goes to the main one --
+# where it covers the top of the window under it, as it did before this file.
+SB=/opt/homebrew/bin/sketchybar
+JQ=/usr/bin/jq
+CONFIG_DIR="${CONFIG_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+
+builtin_id=$("$CONFIG_DIR/bin/sysprobe" screen 2>/dev/null | /usr/bin/tr ' ' '\n' | /usr/bin/awk -F= '$1 == "display" { print $2 }')
+
+display=main
+if [ -n "$builtin_id" ] && [ "$builtin_id" != 0 ]; then
+  arrangement=$("$SB" --query displays | "$JQ" -r --argjson id "$builtin_id" \
+    '.[] | select(.DirectDisplayID == $id) | ."arrangement-id"')
+  [ -n "$arrangement" ] && display=$arrangement
+fi
+
+"$SB" --bar display="$display"

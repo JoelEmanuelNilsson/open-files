@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# Puts the bar in the current macOS appearance: the moon/sun glyph, and every
+# colour on the bar. Idempotent and cheap, because it runs in three situations:
+# once when the bar loads (items/right.sh), once per
+# AppleInterfaceThemeChangedNotification -- macOS posts about twenty per flip
+# -- and from `bin/theme reload` after a theme apply.
+#
+# Absolute paths: at login this runs from launchd, whose PATH lacks Homebrew.
+# The order is load-bearing: lib/icons.sh sizes every glyph from the chip
+# height lib/skin.sh resolved.
+source "$CONFIG_DIR/lib/skin.sh"
+source "$CONFIG_DIR/lib/icons.sh"
+source "$CONFIG_DIR/lib/rooms.sh"
+SB=/opt/homebrew/bin/sketchybar
+AEROSPACE=/opt/homebrew/bin/aerospace
+
+if [ "$CHROME_MODE" = dark ]; then
+  icon="$ICON_DARK"; pt="$PT_DARK"; pad="$PAD_DARK"
+else
+  icon="$ICON_LIGHT"; pt="$PT_LIGHT"; pad="$PAD_LIGHT"
+fi
+
+# ── Text, everywhere ────────────────────────────────────────────────────────
+# `--default` is no use here: it only reaches items added afterwards, and by
+# now there are none. A blanket regex is safe for *text* and for nothing else
+# -- see the background rule below. A lit glyph is unaffected because it uses
+# icon.highlight, which this never touches.
+#
+# sketchybar matches names with POSIX *basic* regular expressions. Anchors
+# work, so do `\.` and `[0-9]` -- alternation does not. `|` and `()` are
+# literal characters there, so `/^(cpu|mem)$/` asks for an item named exactly
+# that, finds nothing, prints `No match found` on **stdout**, and exits 0.
+# One pattern per clause is the only safe form.
+"$SB" --set '/.*/' label.color="$CHROME_TEXT" \
+                   icon.color="$CHROME_TEXT" \
+                   label.highlight_color="$CHROME_ON_CELL" \
+                   icon.highlight_color="$CHROME_ON_CELL"
+
+# ── Backgrounds, by name ────────────────────────────────────────────────────
+#
+# THE RULE: set the colour first and background.drawing last, in the same
+# clause, always. Setting any `background.<anything>` implicitly turns drawing
+# **on**, and a clause's properties apply left to right, so drawing only holds
+# if it has the last word. Measurements are in lib/rooms.sh.
+#
+# So there is no such thing as a blanket colour repaint here. The first version
+# of this file did `--set '/.*/' background.color=...` and switched on every
+# background on the bar: all three rooms lit at once, and all nine spacers grew
+# a bordered chip, turning the gaps into boxes. Nothing warns you; the bar just
+# looks like a layout bug.
+#
+# Hence three groups, each naming what it paints and whether it is drawn:
+#
+#   chips    always drawn, in whatever the skin says a chip is -- transparent
+#            under glass. Every bracket is named chip.<group> (sketchybarrc's
+#            chip()), so one anchored pattern reaches all of them and nothing
+#            else. media is the one chip that is an item's own background
+#            (items/left.sh says why), so it is named.
+#
+#   graphs   always drawn and always invisible -- a graph renders inside its
+#            background's bounds, and with drawing off those bounds fall back
+#            to the full height of the bar.
+#   cells    drawn only when lit. Owned by whoever knows the state: the rooms
+#            by lib/rooms.sh (called below and by bin/bridge-aerospace), the
+#            boost button by bin/pump, which hides it with the *item's*
+#            drawing rather than its background's.
+#
+# Spacers are named nowhere on purpose. Their backgrounds must stay off, and
+# the only way to guarantee that is to never mention them.
+#
+"$SB" --set '/^chip\./' background.color="$CHROME_CHIP" \
+                         background.border_color="$CHROME_BORDER" \
+                         background.drawing=on \
+      --set media background.color="$CHROME_CHIP" \
+                  background.border_color="$CHROME_BORDER" \
+                  background.drawing=on >/dev/null
+
+for graph in cpu mem; do
+  "$SB" --set "$graph" background.color="$CHROME_NONE" \
+                       graph.color="$CHROME_GRAPH" \
+                       graph.fill_color="$CHROME_GRAPH_FILL" \
+                       background.drawing=on
+done
+
+"$SB" --set boost background.color="$CHROME_CELL" background.drawing=on \
+      --set appearance icon="$icon" icon.font="$GLYPH_FONT$pt" \
+                       icon.padding_left="$pad" \
+      --set apple popup.blur_radius="$CHIP_BLUR" \
+                  popup.background.color="$CHROME_POPUP" \
+                  popup.background.border_color="$CHROME_POPUP_BORDER" \
+                  popup.background.drawing=on \
+      --bar color="$CHROME_BAR" blur_radius="$BAR_BLUR"
+
+# The rooms, through the one implementation that knows a cell has a colour and
+# a drawn/not-drawn state and that the two must be set together. One fork to
+# ask which room is focused; this runs about once per flip, after `theme
+# reload` has coalesced macOS's burst.
+paint_workspace "$("$AEROSPACE" list-workspaces --focused 2>/dev/null)"
+
+# The wallpaper and the other consumers only follow the mode when told.
+# `theme reload` coalesces the burst of notifications into one run. Detached
+# (double fork, no inherited fds) so the bar never waits on it.
+if [ "$SENDER" = "appearance_change" ]; then
+  ( "$HOME/dotfiles/bin/theme" reload </dev/null >/dev/null 2>&1 & ) &
+fi

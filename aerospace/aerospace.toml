@@ -1,0 +1,400 @@
+# AeroSpace — the window manager.
+#
+# Two ideas run the whole thing.
+#
+#   Workspaces are rooms. One room is on screen; the rest are parked off the
+#   side of the display. Switching is instant because nothing animates — the
+#   windows are simply moved back on screen. These are not macOS Spaces;
+#   AeroSpace ignores those entirely.
+#
+#   A mode is a keyboard layer. Normally AeroSpace watches exactly one key:
+#   º. Press it and plain letters mean things until the layer closes.
+#   Same shape as Neovim's normal mode.
+#
+# Why not the usual alt-based keymap: on a Spanish ISO layout the left Option
+# key types | @ # ~ [ ] { } \, so alt is a typing key here, not a modifier.
+# Every AeroSpace config on the internet is unusable as written for that one
+# reason. Hence bare keys and a layer instead of chords.
+#
+# If you ever lock yourself out, `aerospace enable on` from any terminal is the
+# way back — `enable off` also stops AeroSpace listening to the keyboard.
+
+config-version = 2
+
+start-at-login = true
+
+# Off; the leader's esc below reloads instead. A config that reloads on every
+# keystroke of a half-written edit puts you in a broken layout while you are
+# still typing.
+auto-reload-config = false
+
+# ── Layout ──────────────────────────────────────────────────────────────────
+
+# Tiles, the same in every room, always. One window fills the screen, two
+# split it in half, three in thirds — what you see is the whole state, the way
+# a Linux tiling setup like Omarchy behaves. Drag a window by its title bar
+# onto another and the two swap; drop it on the other monitor and it moves
+# there; drop it anywhere else and it goes back to its tile.
+#
+# There is no key that changes a room's layout, and that is the point. A room
+# is given its layout once, when AeroSpace first creates it, and keeps it after
+# it empties (the root container is never normalised away). So the old
+# accordion/tiles toggle left a room in whichever layout was pressed last, for
+# good and invisibly, and the next window opened there came up full screen or
+# half width depending on a key pressed hours ago.
+#
+# An app that cannot draw at half width is not squeezed: it floats at its own
+# size (see the float list below).
+#
+# auto: side by side on a landscape monitor, stacked on a portrait one.
+default-root-container-layout = 'tiles'
+default-root-container-orientation = 'auto'
+
+# Off, deliberately. There is no delay or distance threshold in AeroSpace —
+# the source is a bare `struct FocusFollowsMouse { var enabled: Bool }` — so
+# one drifting pointer sends your keystrokes somewhere else mid-sentence.
+focus-follows-mouse.enabled = false
+
+# The upstream default. When a room key moves focus to the other monitor, the
+# pointer follows it there — `lazy`: only if it is not on that monitor already.
+# Without it the keyboard is on one screen and the pointer on the other, and
+# the next scroll or click lands on the screen you just left.
+on-focused-monitor-changed = ['move-mouse monitor-lazy-center']
+
+# Rooms 1-3 exist even when empty, so their keys always work and the bar always
+# has three slots to draw rather than a list that changes shape.
+persistent-workspaces = ['1', '2', '3']
+
+# ── Which window has the keyboard ───────────────────────────────────────────
+#
+# AeroSpace draws nothing on screen, so with two windows side by side there is
+# no way to tell which one your typing goes to. JankyBorders is the companion
+# tool for that: one hairline around the focused window.
+#
+# Half the border is drawn under the window, so what you see is about a pixel
+# less than the width you ask for. Measured on this screen, in device pixels:
+# 2.0 gives 1, 3.0 gives 2, 4.0 gives 3. Two is the hairline.
+#
+# The daemon is not started here. sketchybar/bin/bridge-aerospace starts and
+# owns it: a `borders` started from this file could not be reached by the
+# bridge's retune calls, which then each became a second daemon and blocked.
+# No window has an outline while you work; the bridge colours the focused
+# window's border in while the leader layer is open and clears it when the
+# layer closes.
+after-startup-command = [
+  # Wallpaper and bar colours follow the appearance the machine logged in with.
+  'exec-and-forget "$HOME"/dotfiles/bin/theme reload',
+  # Windows that were open before AeroSpace started never fire a birth rule.
+  # Put Ghostty and Chrome where they belong before you press anything.
+  'exec-and-forget "$HOME"/dotfiles/aerospace/bin/aerospace-heal',
+]
+
+# cmd-H hides an app from macOS, and AeroSpace leaves hidden apps hidden. The
+# result is a room you switch to that shows nothing but the wallpaper, with no
+# hint of why — the window is still "there", macOS is just refusing to draw it.
+# On means a fat-fingered cmd-H undoes itself, which turns a baffling failure
+# into no failure at all.
+automatically-unhide-macos-hidden-apps = true
+
+# Outer gaps 0: windows run edge to edge, for the most screen space.
+# Inner gaps 8: the space between two tiled windows side by side.
+#
+# The top needs no "room for the bar" gap. On a notched display macOS already
+# withholds the top strip from every app: `frame` is 1117pt tall and
+# `visibleFrame` is 1085, and the missing 32 are the notch. AeroSpace tiles
+# inside the visible frame, and SketchyBar is exactly those same 32 points, so
+# windows already start below it. (Set to 38+4 it stacked a second gap on the
+# reservation and left 74pt of dead space above every window.)
+#
+# The bottom is -1 on the laptop because AeroSpace always lays out tiled
+# windows 1pt shorter than the area (layoutRecursive.swift: `rect.height - 1`,
+# a workaround for a narrower monitor stacked below another one). With 0, every
+# window stops at 1116pt and leaves a 1pt strip of wallpaper under it. The -1
+# cancels that, so windows run 32..1117pt, the bottom edge of the screen. It is
+# scoped to the built-in display, which is never the upper monitor in a stack.
+#
+# Ghostty's rows will not divide the window height exactly. Its
+# window-padding-balance centres the leftover, and window-padding-color fills it
+# with the colour of the edge rows (see ghostty/config).
+gaps.inner.horizontal = 8
+gaps.inner.vertical   = 8
+gaps.outer.left       = 0
+gaps.outer.right      = 0
+gaps.outer.bottom     = [{ monitor.'built-in' = -1 }, 0]
+gaps.outer.top        = 0
+
+# ── Which monitor a room is on ──────────────────────────────────────────────
+#
+# With an external monitor plugged in, Chrome's room moves to it and the
+# terminal and the drawer stay on the laptop. Each monitor shows one room at a
+# time, so this is what puts the terminal and Chrome side by side on two
+# screens: `t` and `c` then move focus between monitors and neither screen
+# changes.
+#
+# Without this, every room belongs to whichever monitor it was last shown on,
+# which is the laptop, so the external got an empty room 4 of its own. A window
+# dragged there lived in room 4; the heal on the next room key put Chrome back
+# in room 2, on the laptop, and it vanished from the external.
+#
+# Each value is a list and the first monitor that exists wins. '^(?!built-in)'
+# is any monitor whose name does not start with "Built-in" — the external,
+# whatever it is called and whichever display is main. Unplugged it matches
+# nothing, 'main' is next, and room 2 comes back to the laptop. Lid closed,
+# 'built-in' matches nothing and every room lands on the external.
+#
+# A force-assigned room cannot be moved by `move-workspace-to-monitor`, and
+# a room shown on the wrong monitor when you plug in is moved to the right one.
+[workspace-to-monitor-force-assignment]
+1 = ['built-in', 'main']
+2 = ['^(?!built-in)', 'main']
+3 = ['built-in', 'main']
+
+# ── Which room a window lives in ────────────────────────────────────────────
+#
+# Two apps have a home of their own. Everything else lives in room 3, and
+# needs no rule to say so: a window with no rule lands in whatever room you
+# are in, beside what is there, and `x` or its summon key sends it to 3.
+#
+# These two rules are THE table of homes. bin/aerospace-lib reads it from
+# this file, so the heal and send-home scripts can never disagree with it.
+# Add a pinned app here and every key learns it.
+#
+# A rule only runs the moment a window is born. Nothing else holds the
+# invariant — which is how Ghostty ended up in room 3 once — so the room keys
+# below re-check it every time you press them (see aerospace-heal).
+#
+[[on-window-detected]]
+if.app-id = 'com.mitchellh.ghostty'
+run = 'move-node-to-workspace 1'
+
+[[on-window-detected]]
+if.app-id = 'com.google.Chrome'
+run = 'move-node-to-workspace 2'
+
+# ── The float list ────────────────────────────────────────────────────────────
+#
+# Apps whose windows are not built to be resized. Tiled, they get cut off: the
+# app's own minimum size wins over the tile, and the part past the tile edge
+# is simply not on screen. Floated, they open at their own size on top of the
+# room, and the mouse moves them like any Mac window. Add an app here when it
+# comes up cut off in a tile.
+#
+# Already floating without a rule:
+#   Dialogs and System Settings — a window with no fullscreen button is taken
+#     for a dialog by AeroSpace's own heuristic and floated.
+#   Wispr Flow's dictation overlay — window level 1000, never managed at all.
+#     The rule below is for its dashboard, an ordinary window with a fixed
+#     text layout.
+#
+# Known cost: a floating window can creep towards the bottom-right after many
+# room switches (AeroSpace issue #1519). It is limited to the apps listed here.
+
+[[on-window-detected]]
+if.app-id = 'com.electron.wispr-flow'
+run = 'layout floating'
+
+# Measured at half the laptop screen (860pt): its queue panel and volume slider
+# run off the right edge of the tile.
+[[on-window-detected]]
+if.app-id = 'com.spotify.client'
+run = 'layout floating'
+
+# ── What the commands above can see ─────────────────────────────────────────
+#
+# Every exec here runs from AeroSpace, not from your shell, so it gets the
+# environment AeroSpace was started with. Start AeroSpace from a terminal and
+# Homebrew is on the PATH by accident; let it start at login and it is not, so
+# the `aerospace` calls inside the summon script stop resolving
+# and the keys quietly do nothing. Naming the prefix here removes the accident.
+
+[exec]
+inherit-env-vars = true
+
+[exec.env-vars]
+PATH = '/opt/homebrew/bin:/opt/homebrew/sbin:${PATH}'
+
+# ── The leader key ───────────────────────────────────────────────────────
+#
+# AeroSpace names keys by physical position using US-QWERTY names, so on a
+# Spanish ISO board:  º = sectionSign,  ç = backslash,  ¡ = equal.
+#
+# `sectionSign`, not `backtick`, and the difference is not cosmetic. Apple's
+# ISO keyboards swap two keycodes against ANSI: the key left of 1 is keycode 10
+# (kVK_ISO_Section) and the key left of Z is keycode 50 (kVK_ANSI_Grave, which
+# AeroSpace calls `backtick`). On a US board those are the same physical key;
+# here they are opposite corners. Binding `backtick` steals < and >, which are
+# typed constantly, and leaves º untouched — it looks like the config simply
+# did not load. The name comes from the UK § key, which sits left of 1.
+#
+# ç (backslash) was a second leader for a week, to find out which one the
+# hand reaches for. It was º; ç types a ç again.
+#
+# A bare key bound here is grabbed by the OS and never reaches any app again.
+# That is the whole cost, and it is why º: it is never typed in English.
+# ¡ (equal) was once a leader too; it is Herdr's prefix now. Note that on
+# a US keyboard `backtick` is the backtick character —
+# on this board that character lives on a different physical key.
+
+[mode.main.binding]
+sectionSign = 'mode leader'
+# ¡ (equal) is remapped to F12 for Herdr — see macos/com.joel.keymap.plist.
+
+# ── The leader layer ────────────────────────────────────────────────────────
+#
+# Two kinds of binding live here, and they behave differently on purpose:
+#
+#   Going somewhere ends the layer. You pressed a key to arrive; you have
+#   arrived; the layer's work is done.
+#
+#   Arranging what is in front of you does not. Focus, resize and layout are
+#   things you do two or three times while watching the result, so they stay
+#   in the layer until you press esc.
+#
+# Anything not bound here falls through to the app underneath while the layer
+# stays open. esc and q both close it.
+
+[mode.leader.binding]
+
+# --- go to a room ---
+# t and c are the same jumps by name, for whichever your head prefers.
+#
+# The switch happens first, instantly. Then the heal runs: if Ghostty or Chrome
+# has strayed from its room (⌘W and reopen, a mis-aimed x, a window AeroSpace
+# saw too late), it is put back a few ms later. So "go to the terminal" always
+# shows the terminal, whatever happened before.
+'1'   = ['workspace 1', 'exec-and-forget "$HOME"/dotfiles/aerospace/bin/aerospace-heal', 'mode main']
+'2'   = ['workspace 2', 'exec-and-forget "$HOME"/dotfiles/aerospace/bin/aerospace-heal', 'mode main']
+'3'   = ['workspace 3', 'exec-and-forget "$HOME"/dotfiles/aerospace/bin/aerospace-heal', 'mode main']
+t     = ['workspace 1', 'exec-and-forget "$HOME"/dotfiles/aerospace/bin/aerospace-heal', 'mode main']
+c     = ['workspace 2', 'exec-and-forget "$HOME"/dotfiles/aerospace/bin/aerospace-heal', 'mode main']
+space = ['workspace-back-and-forth', 'mode main']
+
+# --- bring something here, or send it back ---
+# One key, pressed twice. First press puts Finder beside your terminal, each
+# taking half; second press sends it home to room 3 and the terminal is full
+# screen again, because it is alone. Launches the app if it is not running.
+f = ['exec-and-forget "$HOME"/dotfiles/aerospace/bin/aerospace-summon com.apple.finder',   'mode main']
+e = ['exec-and-forget "$HOME"/dotfiles/aerospace/bin/aerospace-summon com.apple.TextEdit', 'mode main']
+s = ['exec-and-forget "$HOME"/dotfiles/aerospace/bin/aerospace-summon com.spotify.client', 'mode main']
+
+# --- put this window away, without going with it ---
+# The answer to "something opened beside my terminal and I have no key for
+# it". The focused window goes to its home: Ghostty to 1, Chrome to 2,
+# everything else to 3. So x can never strand a pinned app — press it with
+# Ghostty focused and Ghostty just stays put.
+x = ['exec-and-forget "$HOME"/dotfiles/aerospace/bin/aerospace-send-home', 'mode main']
+
+# --- the status bar ---
+# Turns sketchybar off, or back on. Off also brings back the macOS menu bar.
+# This is the only way back on, because the bar's own Turn Off Bar button is
+# gone once the bar is. See sketchybar/plugins/bar-power.
+b = ['exec-and-forget "$HOME"/dotfiles/sketchybar/plugins/bar-power', 'mode main']
+
+# --- throw this window into a room and follow it ---
+shift-1 = ['move-node-to-workspace 1', 'workspace 1', 'mode main']
+shift-2 = ['move-node-to-workspace 2', 'workspace 2', 'mode main']
+shift-3 = ['move-node-to-workspace 3', 'workspace 3', 'mode main']
+
+# --- arrange what is on screen (the layer stays open) ---
+# Every window in this room, in turn, floating ones included. The arrows move
+# by geometry, which is the wrong tool for a window that is on top of another:
+# a floating System Settings sitting over a full-screen terminal is neither
+# left of it nor right of it, so no arrow reaches it. `dfs-next` walks the
+# room's windows in order instead, and AeroSpace lends floating windows a place
+# in that order for the length of the command (`--ignore-floating` opts out).
+# This is the way back to a pop-up that a full-screen window has covered.
+tab       = 'focus dfs-next --wrap-around'
+shift-tab = 'focus dfs-prev --wrap-around'
+
+left  = 'focus left'
+down  = 'focus down'
+up    = 'focus up'
+right = 'focus right'
+
+shift-left  = 'move left'
+shift-down  = 'move down'
+shift-up    = 'move up'
+shift-right = 'move right'
+
+# Smaller and bigger, on the keys that say - and + on this board. `slash` and
+# `rightSquareBracket` are US-QWERTY position names; the characters printed on
+# the keycaps here are the ones that matter, and they are the right ones.
+slash             = 'resize smart -50'
+rightSquareBracket = 'resize smart +50'
+
+# This window over the whole screen, and back. AeroSpace's own full screen, not
+# macOS's: no new Space, no animation, and the other tiles are still there.
+# A script because AeroSpace's toggle does not toggle a floating window back;
+# see aerospace-fullscreen. A window alone in its room is already full screen,
+# so there it changes nothing you can see.
+enter = ['exec-and-forget "$HOME"/dotfiles/aerospace/bin/aerospace-fullscreen', 'mode main']
+
+# No layout keys and no float toggle, on purpose. `a`/`d` switched a room
+# between accordion and tiles, and the room stayed that way invisibly (see
+# Layout at the top). `o` floated a window, and a window floated by mistake
+# drifts into the bottom-right corner over many room switches — Ghostty spent
+# a day like that. `shift-j`/`shift-l` nested windows, which no one used. What
+# floats is decided by the float list, not by a key.
+
+# --- housekeeping ---
+esc       = ['reload-config', 'mode main']
+r         = ['flatten-workspace-tree', 'mode main']
+backspace = ['close-all-windows-but-current', 'mode main']
+
+# --- every other key on the board closes the layer ---
+#
+# Not tidiness — this is the difference between a mode and a trap.
+#
+# AeroSpace passes any key you did not bind straight through to the app
+# underneath, and leaves the mode open. So with the obvious config, pressing º
+# twice types a º into your terminal, and pressing º then any stray letter
+# types that letter and strands you in a layer with nothing on screen to say
+# so. Every keystroke after it lands somewhere you did not mean.
+#
+# Listing the rest of the keyboard here makes that impossible rather than
+# unlikely: while the layer is open no key can type a character, and any key
+# that means nothing here puts you back where you started. The leader key is
+# in this list too, so double-tapping it is "open, changed my mind, closed"
+# and never a stray character.
+#
+# The cost is that a key added above must be deleted below. The doctor in
+# install.sh checks for exactly that, because a key bound twice in one mode is
+# a TOML duplicate and AeroSpace would refuse the whole config.
+
+sectionSign        = 'mode main'   # º — the leader key itself
+backslash          = 'mode main'   # ç
+
+a = 'mode main'
+d = 'mode main'
+g = 'mode main'
+h = 'mode main'
+i = 'mode main'
+j = 'mode main'
+k = 'mode main'
+l = 'mode main'
+m = 'mode main'
+n = 'mode main'
+o = 'mode main'
+p = 'mode main'
+q = 'mode main'
+u = 'mode main'
+v = 'mode main'
+w = 'mode main'
+y = 'mode main'
+z = 'mode main'
+
+'0' = 'mode main'
+'4' = 'mode main'
+'5' = 'mode main'
+'6' = 'mode main'
+'7' = 'mode main'
+'8' = 'mode main'
+'9' = 'mode main'
+
+minus              = 'mode main'   # '
+comma              = 'mode main'   # ,
+period             = 'mode main'   # .
+quote              = 'mode main'   # ´
+semicolon          = 'mode main'   # ñ
+backtick           = 'mode main'   # <  (only while the layer is open)
+leftSquareBracket  = 'mode main'   # `

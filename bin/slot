@@ -1,0 +1,213 @@
+#!/bin/bash
+# slot: run a heavy command once the Mac's shared core budget has room for it.
+#
+#     slot [--lane <name>] <pool> <n> -- <command...>    pool full = half the cores (vitest's workers), quick = 2; <n> is ignored
+#     slot [--lane <name>] --cores <k> -- <command...>   reserve k cores
+#
+# Waiters are served first come, first served, with one exception, backfill: a
+# waiter behind the head of the queue may start first when that cannot delay the
+# head. Let B be the budget, h the head's cores, old the running jobs whose tickets
+# are older than the head's, and S the largest sum of a subset of old that is at
+# most B - h. The head becomes startable without backfill at the first moment the
+# old jobs still running hold at most B - h, which is at most S. So a waiter
+# starts ahead of the head only if
+#     (cores of running jobs with tickets newer than the head's) + its cores <= B - h - S
+# and it does not want the head's lane. Holding that at every start means the head
+# starts no later than it would without backfill; it needs no extra state, because
+# a running job with a ticket newer than the waiting head's is exactly one that
+# overtook it, whichever head was waiting when it started. No head starves: new
+# backfill only shrinks what fits, and every job it waits on is already running.
+#
+# --lane <name> asks for an exclusive lane (e.g. a browser that only one job
+# may drive) as well as cores. Both are granted in one step under the state lock: a
+# waiter holds neither, a started job holds both, and the lane is freed when the
+# job's process exits. A lane is also taken while a Docker container of the same
+# name exists, because callers not yet switched to --lane still take the lane by
+# starting that container; slot never starts or removes it. The lane name is
+# exported to the command as SLOT_LANE.
+#
+# SLOT_PRIORITY (non-empty) puts the waiter ahead of every waiter without it, in
+# arrival order among themselves: its ticket is 12 zeros then the sequence number,
+# which sorts before every plain 12-digit ticket. It never stops a running job;
+# the jobs that started before it count as having overtaken it, which only
+# narrows backfill. For the merge queue's checks, which every landing waits on.
+#
+# While waiting, slot prints who holds the cores. Once granted it execs the
+# command with SLOT_CORES set to the cores reserved, so the command's exit code
+# and signals are its own. A reservation lives as long as its process: when the
+# command exits or dies, the next caller reclaims its cores and its lane.
+#
+# Budget: SLOT_BUDGET, else the number in <state>/budget, else 12 (of 14 cores).
+# A request larger than the budget is cut to the budget.
+# State: SLOT_STATE_DIR, else ~/.local/state/slot. Every caller on the machine
+# must share it, so it is deliberately not derived from XDG_* or the repo.
+# Queue and held files keep the first version's six lines (pid, start, cores,
+# since, cwd, command); the lane is a seventh line, which that version ignores.
+#
+# Replace this file only by writing a new one and renaming it over this one,
+# never by editing it in place: bash reads a running script from disk as it
+# goes, so an in-place edit corrupts every caller waiting in the queue.
+set -u
+
+usage() {
+	echo "usage: slot [--lane <name>] <pool> <n> -- <command...> | slot [--lane <name>] --cores <k> -- <command...>" >&2
+	exit 64
+}
+
+lane=""
+if [ "${1:-}" = --lane ]; then
+	[ $# -ge 2 ] || usage
+	lane=$2
+	shift 2
+	case $lane in '' | *[!A-Za-z0-9._-]*) echo "slot: lane '$lane' must be letters, digits, '.', '_' or '-'" >&2; exit 64 ;; esac
+fi
+[ $# -ge 4 ] && [ "$3" = "--" ] || usage
+case $1 in
+--cores) cores=$2 ;;
+full) cores=$(( $(sysctl -n hw.ncpu) / 2 )) ;;
+quick) cores=2 ;;
+*) echo "slot: unknown pool '$1' (full, quick, or --cores <k>)" >&2; exit 64 ;;
+esac
+shift 3
+case $cores in '' | *[!0-9]* | 0) usage ;; esac
+
+state=${SLOT_STATE_DIR:-$HOME/.local/state/slot}
+mkdir -p "$state/queue" "$state/held" || exit 70
+if [ -n "${SLOT_BUDGET:-}" ]; then budget=$SLOT_BUDGET
+elif [ -f "$state/budget" ]; then budget=$(tr -dc 0-9 < "$state/budget")
+else budget=12
+fi
+case $budget in '' | *[!0-9]* | 0) echo "slot: budget '$budget' is not a positive integer" >&2; exit 64 ;; esac
+[ "$cores" -gt "$budget" ] && cores=$budget
+
+# A process is identified by pid and start time, so a recycled pid is not taken for a live holder.
+started() { ps -o lstart= -p "$1" 2>/dev/null; }
+me_start=$(started $$)
+alive() { [ -n "$2" ] && [ "$(started "$1")" = "$2" ]; }
+
+age() { echo $(( $(date +%s) - $(stat -f %m "$1" 2>/dev/null || date +%s) )); }
+lock=$state/lock
+# Breakers take lock.break first, so two waiters that saw the same dead holder
+# cannot both break the lock, the second removing the one the first just took.
+break_stale_lock() {
+	if ! mkdir "$lock.break" 2>/dev/null; then
+		[ "$(age "$lock.break")" -gt 5 ] && rm -rf "$lock.break"
+		return
+	fi
+	holder=$(cat "$lock/pid" 2>/dev/null)
+	if [ -n "$holder" ]; then
+		kill -0 "$holder" 2>/dev/null || rm -rf "$lock"
+	elif [ -d "$lock" ] && [ "$(age "$lock")" -gt 5 ]; then
+		rm -rf "$lock"
+	fi
+	rmdir "$lock.break"
+}
+take_lock() {
+	until mkdir "$lock" 2>/dev/null; do
+		break_stale_lock
+		sleep 0.05
+	done
+	echo $$ > "$lock/pid"
+}
+drop_lock() { rm -rf "$lock"; }
+
+ticket=""
+cleanup() {
+	[ -n "$ticket" ] && rm -f "$state/queue/$ticket"
+	[ "$(cat "$lock/pid" 2>/dev/null)" = "$$" ] && drop_lock
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+
+take_lock
+seq=$(( $(cat "$state/next" 2>/dev/null || echo 0) + 1 ))
+echo "$seq" > "$state/next"
+ticket=$(printf '%012d' "$seq")
+[ -n "${SLOT_PRIORITY:-}" ] && ticket=000000000000$ticket
+enqueue() { printf '%s\n' "$$" "$me_start" "$cores" "$(date +%s)" "$PWD" "$*" "$lane" > "$state/queue/$ticket"; }
+enqueue "$@"
+drop_lock
+
+# Fields of a queue or held file: pid, start, cores, since, cwd, command, lane.
+field() { sed -n "${2}p" "$1" 2>/dev/null; }
+
+# Exits 0 while a Docker container named $1 exists; a missing or hung Docker counts as none.
+lane_container() {
+	command -v docker >/dev/null 2>&1 &&
+		perl -e 'alarm 5; exec @ARGV' docker container inspect --format x "$1" >/dev/null 2>&1
+}
+
+last_note=0
+while :; do
+	lane_outside=0
+	[ -n "$lane" ] && lane_container "$lane" && lane_outside=1
+	take_lock
+	for f in "$state/held"/* "$state/queue"/*; do
+		[ -f "$f" ] || continue
+		alive "$(field "$f" 1)" "$(field "$f" 2)" || rm -f "$f"
+	done
+	# A failed ps must not cost this waiter its place for good.
+	[ -f "$state/queue/$ticket" ] || enqueue "$@"
+	head=""
+	for f in "$state/queue"/*; do [ -f "$f" ] && { head=${f##*/}; break; }; done
+	head_cores=$(field "$state/queue/$head" 3)
+	head_cores=${head_cores:-0}
+	head_lane=$(field "$state/queue/$head" 7)
+	used=0 overtaken=0 old="" lanes=" "
+	for f in "$state/held"/*; do
+		[ -f "$f" ] || continue
+		c=$(field "$f" 3)
+		used=$(( used + c ))
+		if [ "${f##*/}" \> "$head" ]; then overtaken=$(( overtaken + c )); else old="$old $c"; fi
+		lanes="$lanes$(field "$f" 7) "
+	done
+	lane_free=1
+	if [ -n "$lane" ]; then
+		case $lanes in *" $lane "*) lane_free=0 ;; esac
+		[ $lane_outside = 1 ] && lane_free=0
+	fi
+	go=0
+	if [ $(( used + cores )) -le "$budget" ] && [ $lane_free = 1 ]; then
+		if [ "$head" = "$ticket" ]; then
+			go=1
+		elif [ -z "$lane" ] || [ "$lane" != "$head_lane" ]; then
+			room=$(( budget - head_cores ))
+			reach=(1)
+			for c in $old; do
+				for (( s = room - c; s >= 0; s-- )); do [ -n "${reach[s]:-}" ] && reach[s+c]=1; done
+			done
+			for (( S = room; S > 0; S-- )); do [ -n "${reach[S]:-}" ] && break; done
+			[ $(( overtaken + cores )) -le $(( room - S )) ] && go=1
+		fi
+	fi
+	if [ $go = 1 ]; then
+		mv "$state/queue/$ticket" "$state/held/$ticket"
+		ticket=""
+		drop_lock
+		break
+	fi
+	drop_lock
+	now=$(date +%s)
+	if [ $(( now - last_note )) -ge 60 ]; then
+		ahead=0
+		for f in "$state/queue"/*; do [ -f "$f" ] && [ "${f##*/}" \< "$ticket" ] && ahead=$(( ahead + 1 )); done
+		wanted="$cores cores"
+		[ -n "$lane" ] && wanted="$wanted and lane $lane ($([ $lane_free = 1 ] && echo free || echo taken))"
+		echo "slot: waiting for $wanted ($used of $budget cores in use, $ahead ahead in the queue). Held by:" >&2
+		for f in "$state/held"/*; do
+			[ -f "$f" ] || continue
+			l=$(field "$f" 7)
+			echo "  $(field "$f" 3) cores${l:+ + lane $l}, $(( now - $(field "$f" 4) ))s: $(field "$f" 5) :: $(field "$f" 6)" >&2
+		done
+		[ $lane_outside = 1 ] && echo "  lane $lane: a Docker container of that name exists outside slot" >&2
+		last_note=$now
+	fi
+	sleep 1
+done
+
+trap - EXIT INT TERM HUP
+export SLOT_CORES=$cores
+[ -n "$lane" ] && export SLOT_LANE=$lane
+exec "$@"

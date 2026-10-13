@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+#
+# Keeps pi's session toggles out of version control.
+#
+# pi/settings.json is two things in one file: durable config (the packages
+# list, the default model) and live UI state pi rewrites as you work.
+# Flipping a thinking block open is not a change to the repo, but the file it
+# lands in is tracked, so git called it one and every commit had to step
+# around it.
+#
+# This is git's `clean` filter for that file: on its way into the index, each
+# volatile key is pinned back to its committed value. The toggle can then
+# never be staged, committed, diffed, stashed, or land in a conflict.
+# Everything else in the file diffs and commits exactly as before.
+#
+# The pins below are the committed defaults — what a fresh clone gets. To
+# change one, edit it here and commit pi/settings.json; `check` fails while
+# the two disagree, so the pin and the file cannot drift apart.
+#
+# Registered per clone by install.sh (git config filter.pi-settings.clean) and
+# pointed at this file by .gitattributes. An unregistered filter is simply not
+# applied, so a clone that skipped install.sh still works.
+#
+# A clean filter alone still leaves one mark: `git status` calls the file
+# modified, with an empty diff. Git's index caches one size per entry, and a
+# pinned `true` against a live `false` is one byte shorter, so git declares
+# the file modified without ever reading it — read-cache.c refuses to hash on
+# a size mismatch. No filter can avoid that: one blob cannot match two
+# worktree lengths.
+#
+# `settle` is the other half. It hashes the file *through this filter* and
+# only when the result is the blob already in the index does it `git add` —
+# which then stages nothing and records the new size, leaving status quiet.
+# A real edit hashes differently and is left alone, visible, exactly as it
+# should be. The kit's `git-settle` extension runs it whenever pi has touched
+# the file, so the mark is gone before anyone looks.
+#
+# There is no smudge half, because there is nothing to preserve: git deletes
+# the worktree file before running smudge, so a checkout cannot see the value
+# it is about to replace. A checkout of this file writes the pinned default.
+#
+# Usage (git and the extension call these; you rarely do):
+#   pi-settings-filter clean < worktree-content > index-content
+#   pi-settings-filter settle  # drop the stale "modified" mark, stage nothing
+#   pi-settings-filter check   # committed file matches the pins
+
+set -euo pipefail
+
+# key=default, where default is JSON. One line per volatile setting.
+PINNED=(
+	"hideThinkingBlock=true"
+)
+
+REPO="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+SETTINGS=pi/settings.json
+
+case "${1:-}" in
+clean)
+	# The filter runs on every add and checkout of the file, so a broken one is
+	# a broken repo. Input is buffered and echoed back byte for byte if it is
+	# not JSON we can rewrite: a filter that cannot do its job must still hand
+	# the content through untouched.
+	input=$(mktemp)
+	trap 'rm -f "$input"' EXIT
+	cat > "$input"
+	program=""
+	for pin in "${PINNED[@]}"; do
+		program+=".\"${pin%%=*}\" = ${pin#*=} | "
+	done
+	if out=$(jq --indent 2 "${program}." < "$input" 2>/dev/null); then
+		# No trailing newline: that is how pi writes the file, and matching it
+		# keeps the filtered content byte-identical to the live one.
+		printf '%s' "$out"
+	else
+		cat "$input"
+	fi
+	;;
+settle)
+	# Both hashes are of filtered content: `hash-object --path` applies the same
+	# clean filter git would. Equal hashes mean the only thing that changed is a
+	# pinned key, so the add below is a stat refresh and nothing else.
+	live=$(git -C "$REPO" hash-object --path "$SETTINGS" "$REPO/$SETTINGS" 2>/dev/null || echo none)
+	indexed=$(git -C "$REPO" ls-files -s -- "$SETTINGS" 2>/dev/null | awk '{print $2}')
+	[[ -n $indexed && $live == "$indexed" ]] || exit 0
+	git -C "$REPO" add -- "$SETTINGS"
+	;;
+check)
+	committed=$(git -C "$REPO" show "HEAD:$SETTINGS" 2>/dev/null || echo "")
+	if [[ -z $committed ]]; then
+		echo "no committed $SETTINGS to check" >&2
+		exit 1
+	fi
+	status=0
+	for pin in "${PINNED[@]}"; do
+		key=${pin%%=*}
+		default=${pin#*=}
+		have=$(printf '%s' "$committed" | jq -c --arg k "$key" '.[$k]')
+		if [[ $have != "$default" ]]; then
+			echo "$SETTINGS has $key = $have, pinned to $default" >&2
+			status=1
+		fi
+	done
+	exit $status
+	;;
+*)
+	echo "usage: pi-settings-filter clean | settle | check" >&2
+	exit 2
+	;;
+esac

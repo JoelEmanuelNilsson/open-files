@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+#
+# Shared by the aerospace-* scripts. Source it; do not run it.
+#
+# The one thing it knows: which room each app calls home. That table is not
+# written here — it is read out of the `[[on-window-detected]]` rules in
+# aerospace.toml, so the birth rules, the heal, and `x` can never disagree.
+
+AEROSPACE_CONFIG="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/aerospace.toml"
+DRAWER_WORKSPACE=3
+
+# Prints "bundle-id workspace" per pinned app, one per line.
+pinned_homes() {
+	awk '
+		/^\[\[on-window-detected\]\]/ { app = "" }
+		/^if\.app-id/ { gsub(/.*= *'\''|'\''.*/, ""); app = $0 }
+		/^run *= *'\''move-node-to-workspace / && app { sub(/.*move-node-to-workspace /, ""); sub(/'\''.*/, ""); print app, $0 }
+	' "$AEROSPACE_CONFIG"
+}
+
+# home_of <bundle-id>  →  its room; the drawer if it has none.
+home_of() {
+	local home
+	home=$(pinned_homes | awk -v id="$1" '$1 == id { print $2; exit }')
+	printf '%s' "${home:-$DRAWER_WORKSPACE}"
+}

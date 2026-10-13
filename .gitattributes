@@ -1,0 +1,5 @@
+# pi rewrites settings.json as you work, so the keys it toggles mid-session are
+# filtered out of git in both directions. See bin/pi-settings-filter; the filter
+# itself is registered per clone by install.sh, and an unregistered filter is
+# simply not applied, so a clone without it still works.
+pi/settings.json filter=pi-settings

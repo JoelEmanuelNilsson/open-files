@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+#
+# Print the transcript of a YouTube video as plain text.
+#
+#   yt-transcript <url-or-id> [lang]
+#
+# Uses yt-dlp to fetch the auto or uploaded captions (default: en), then strips
+# the VTT timing lines and the duplicate cues YouTube emits for rolling
+# captions, so what is left reads like prose.
+
+set -euo pipefail
+
+url=${1:?usage: yt-transcript <url-or-id> [lang]}
+lang=${2:-en}
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+yt-dlp --quiet --no-warnings --skip-download \
+	--write-subs --write-auto-subs --sub-langs "$lang" --sub-format vtt \
+	-o "$tmp/t" "$url"
+
+vtt=$(ls "$tmp"/t*.vtt 2>/dev/null | head -1)
+[[ -n "$vtt" ]] || { echo "no $lang captions found" >&2; exit 1; }
+
+# Drop headers, timing lines and inline <c>/<00:00:00.000> tags; then collapse
+# the consecutive duplicate lines that rolling captions produce.
+sed -E \
+	-e '/^WEBVTT/d' -e '/^Kind:/d' -e '/^Language:/d' \
+	-e '/-->/d' \
+	-e 's/<[^>]*>//g' -e 's/&nbsp;/ /g' -e 's/[[:space:]]+$//' \
+	-e '/^[[:space:]]*$/d' \
+	"$vtt" | awk 'NF && $0 != prev { print; prev = $0 }'

@@ -1,0 +1,69 @@
+# A theme is this file and nothing else: a colour and a few numbers.
+# cyberdream -- pure black, pure white, six neon accents.
+#
+# Ported from PraveenGongada/dotfiles' Ghostty theme, which is the cyberdream
+# palette. Everything below is his, restated as the lightnesses and OKLCH
+# accents gen.py builds from, so that the same six numbers also dress the bar:
+#
+#   background 000000   slot 0  16181a   slot 8  8d96a0
+#   foreground ffffff   slot 7  ffffff   slot 15 ffffff
+#
+# Its surfaces are pure grey -- tint and text_tint are 0, which is the only
+# theme here that uses them that way. The colour is entirely in the accents.
+
+seed = "#5ea1ff"      # his blue. With tint 0 the hue reaches nothing but the
+                      # cursor, so this is a label more than a setting.
+tint = 0              # OKLCH chroma of the surface tiers; 0 = true grey
+text_tint = 0         # OKLCH chroma of the text tiers; 0 = true grey
+accent_chroma = 0.11  # unused: all twelve accent slots are explicit below
+hue_pull = 0          # ditto
+skin = "islands"      # sketchybar/skins/<name>.sh: one glass chip per group.
+                      # Changing it reloads the bar.
+opacity = 0.68        # his is 0.6; a touch more opaque over the neon photo.
+                      # The DEFAULT for both modes, not a theme-wide constant:
+                      # light.toml overrides it with 1.0, because paper behind
+                      # glass is unreadable. This is the number dark mode gets.
+blur = 20
+
+[dark]
+# His own, from PraveenGongada/dotfiles' wallpapers/. A photo rather than the
+# rendered gradient, because bg is pure black here: "auto" derives the desktop
+# from the palette, and a gradient lifted 0.16 off 0.0 is a black screen. It is
+# also what the theme's opacity is for -- glass over nothing is a dimmer black.
+# Cyan neon on near-black is the palette's own #5ea1ff and #5ef1ff.
+wallpaper = "cyberdream-dark.jpg"
+bg = 0.0              # #000000. Not near-black: his background is pure black
+surface = 0.208       # #16181a
+selection = 0.371     # #3c4048
+dim = 0.669           # #8d96a0
+muted = 1.0           # #ffffff -- slot 7 is white in his palette, the same
+                      # colour as the foreground. The bar does not read it:
+                      # the islands skin fills its chips with bg at the glass opacity.
+fg = 1.0
+strong = 1.0
+cursor = 1.0
+accent = 0.8          # unused: every accent slot is explicit
+bright_delta = 0.0    # his slots 9-14 are identical to 1-6
+
+# His six ANSI tones, measured out of the theme file as [OKLCH L, C, h].
+# Explicit rather than derived because the whole character of cyberdream is
+# that its accents are near-fluorescent and its surfaces have no colour at all
+# -- a spectrum derived from one seed cannot be both.
+[dark.accents]
+1 = [0.622, 0.169, 25.0]    # red      #da5450  -- his is #d9534f at L 0.619,
+                            # which holds 4.48:1 on slot 0 and so misses the
+                            # 4.5 floor by two hundredths once the floor is
+                            # measured on the panel as well as on bg. Three
+                            # thousandths of lightness, one byte of red.
+2 = [0.885, 0.233, 144.7]   # green    #5eff6c
+3 = [0.961, 0.180, 114.0]   # yellow   #f1ff5e
+4 = [0.707, 0.154, 257.1]   # blue     #5ea1ff
+5 = [0.667, 0.234, 308.5]   # magenta  #bd5eff
+6 = [0.885, 0.125, 204.0]   # cyan     #5ef1ff
+
+# Light mode is theme/light.toml -- cardboard -- and it is shared by every
+# setup here, merged in as this file's [light] table by gen.load_setup_toml. It
+# used to be forty lines copied into each of the three, which is not a shared
+# light mode but three that happened to agree. To give this theme its own, add
+# [light] keys below: each one overrides that file's, and the rest still come
+# from it.

@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+#
+# Now playing -> the bar.
+#
+# sketchybar's own `media_change` event is deprecated on macOS 26 and no longer
+# fires: Apple locked the private MediaRemote framework against unentitled
+# processes in 15.4. `media-control` gets around it by loading the framework
+# inside /usr/bin/perl, which Apple signs and entitles. That is load-bearing
+# and worth knowing -- if Apple ever hardens perl, this item goes blank and
+# nothing else on the bar is affected.
+#
+# The payoff is that this covers Spotify and Chrome with the same code, because
+# it reads what macOS itself believes is playing rather than asking any one
+# app. A YouTube tab publishes its title and channel to MediaRemote exactly the
+# way Spotify publishes track and artist.
+#
+# ONE ITEM, NOT TWO. macOS tracks a single now-playing session, so with Spotify
+# and a YouTube tab both loaded there is only ever one answer -- whichever took
+# the session last. The icon says which app is holding it.
+
+set -u
+
+CONFIG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Before the glyphs, because a glyph's size comes from the skin's chip height.
+source "$CONFIG_DIR/lib/skin.sh"
+source "$CONFIG_DIR/lib/icons.sh"
+
+SKETCHYBAR=/opt/homebrew/bin/sketchybar
+MEDIA_CONTROL=/opt/homebrew/bin/media-control
+JQ=/usr/bin/jq
+
+command -v "$MEDIA_CONTROL" >/dev/null 2>&1 || exit 0
+
+# media-control leaves an orphaned perl at PPID 1 if the wrapper is killed, so
+# every generation of this bridge would leak one. Clean up our own subtree.
+cleanup() {
+  pkill -P $$ >/dev/null 2>&1
+  pkill -f 'mediaremote-adapter.pl' >/dev/null 2>&1
+}
+trap cleanup EXIT INT TERM
+
+last=""
+last_text=""
+
+"$MEDIA_CONTROL" stream --no-artwork --debounce=400 2>/dev/null |
+while IFS= read -r line; do
+  # Cheap gate before an expensive parse. In diff mode most lines are elapsed
+  # time ticking, which changes nothing visible; only pay for jq when the
+  # payload mentions a field that is actually on screen.
+  case "$line" in
+    *'"title"'*|*'"artist"'*|*'"playing"'*|*'"bundleIdentifier"'*) ;;
+    *) continue ;;
+  esac
+
+  # jq rather than string surgery: track titles contain quotes, brackets and
+  # emoji, and the one thing you cannot do to arbitrary JSON is parse it with
+  # parameter expansion.
+  read -r playing bundle text <<EOF
+$(printf '%s' "$line" | "$JQ" -r '
+    .payload // {} |
+    [ (if .playing == true then "1" else "0" end),
+      (.bundleIdentifier // "-"),
+      ((.artist // "") + (if (.artist // "") != "" and (.title // "") != "" then " — " else "" end) + (.title // ""))
+    ] | @tsv' 2>/dev/null | tr '\t' ' ')
+EOF
+
+  # A diff line carries only what changed, so a payload with no title is not
+  # "nothing is playing" -- it is "the title did not change". Keep the last
+  # known text in that case.
+  case "$line" in
+    *'"title"'*) last_text="$text" ;;
+    *) text="${last_text:-$text}" ;;
+  esac
+
+  if [ -z "${text// /}" ]; then
+    "$SKETCHYBAR" --set media drawing=off >/dev/null 2>&1
+    last=""
+    continue
+  fi
+
+  # The size travels with the glyph, and so does the padding that centres it in
+  # its cell. These three have different ink, so one icon.font set on the item
+  # would be right for one app and wrong for the other two.
+  case "$bundle" in
+    com.spotify.client) icon="$ICON_SPOTIFY"; pt="$PT_SPOTIFY"; pad="$PAD_SPOTIFY" ;;
+    com.google.Chrome)  icon="$ICON_CHROME";  pt="$PT_CHROME";  pad="$PAD_CHROME" ;;
+    com.apple.Music)    icon="$ICON_MUSIC";   pt="$PT_MUSIC";   pad="$PAD_MUSIC" ;;
+    *)                  icon="$ICON_MUSIC";   pt="$PT_MUSIC";   pad="$PAD_MUSIC" ;;
+  esac
+
+  # Paused is not hidden. A track that is paused is still the thing you are
+  # listening to, and an item that vanishes on pause makes the rest of the row
+  # shuffle sideways.
+  sig="$playing|$icon|$text"
+  [ "$sig" = "$last" ] && continue
+  last="$sig"
+
+  "$SKETCHYBAR" --set media drawing=on "icon=$icon" \
+                            "icon.font=$GLYPH_FONT$pt" \
+                            "icon.padding_left=$pad" \
+                            "label=$text" >/dev/null 2>&1
+done

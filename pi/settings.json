@@ -1,0 +1,44 @@
+{
+  "defaultProvider": "anthropic",
+  "defaultModel": "claude-opus-5-5",
+  "defaultThinkingLevel": "high",
+  "lastChangelogVersion": "1.1.0",
+  "packages": [
+    {
+      "source": "npm:pi-web-search@1.3.1",
+      "extensions": []
+    },
+    "~/dotfiles/pi/kit"
+  ],
+  "defaultTools": [
+    "+tool_search"
+  ],
+  "terminal": {
+    "showTerminalProgress": true
+  },
+  "steeringMode": "one-at-a-time",
+  "showCacheMissNotices": true,
+  "cacheWarming": "idle",
+  "defaultProjectTrust": "always",
+  "modelThinkingLevels": {
+    "anthropic/claude-opus-5-5": "high",
+    "openai-codex/gpt-6-luna": "high",
+    "openai-codex/gpt-6-astra": "high",
+    "openai-codex/gpt-6.1-sol": "high"
+  },
+  "warnings": {
+    "anthropicExtraUsage": false
+  },
+  "tuiMode": "fullscreen",
+  "outputPad": 0,
+  "hideThinkingBlock": true,
+  "compaction": {
+    "enabled": true,
+    "modelOverrides": {
+      "anthropic/claude-opus-5-5": {
+        "reserveTokens": 500000
+      }
+    }
+  },
+  "theme": "ansi"
+}
